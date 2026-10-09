@@ -5,3 +5,7 @@
 *.db
 *.sqlite3
 /data/
+
+*.sqlite3-*
+*.db-*
+*.log

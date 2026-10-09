@@ -1,0 +1,42 @@
+[
+  {
+    "external_vacancy_id": "fixture-rust-remote",
+    "external_url": "https://example.invalid/jobs/rust-remote",
+    "company_name": "Example Systems",
+    "title": "Rust Backend Engineer",
+    "description": "Build Rust HTTP APIs with SQLite, React and Tokio.",
+    "location": "Remote",
+    "work_format": "remote",
+    "employment_type": "full_time"
+  },
+  {
+    "external_vacancy_id": "fixture-react-hybrid",
+    "external_url": "https://example.invalid/jobs/react-hybrid",
+    "company_name": "Example Studio",
+    "title": "React Frontend Engineer",
+    "description": "TypeScript and React UI development.",
+    "location": "London",
+    "work_format": "hybrid",
+    "employment_type": "full_time"
+  },
+  {
+    "external_vacancy_id": "fixture-rust-contract",
+    "external_url": "https://example.invalid/jobs/rust-contract",
+    "company_name": "Example Tools",
+    "title": "Rust Platform Developer",
+    "description": "Rust and SQLite tooling on a contract.",
+    "location": "Berlin",
+    "work_format": "onsite",
+    "employment_type": "contract"
+  },
+  {
+    "external_vacancy_id": "fixture-rust-unpaid",
+    "external_url": "https://example.invalid/jobs/rust-unpaid",
+    "company_name": "Example Learning",
+    "title": "Rust Internship",
+    "description": "Unpaid learning internship with Rust.",
+    "location": "Remote",
+    "work_format": "remote",
+    "employment_type": "internship"
+  }
+]
