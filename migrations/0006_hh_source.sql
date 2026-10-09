@@ -1,0 +1,1 @@
+INSERT INTO vacancy_source(id,code,data) VALUES ('20000000-0000-4000-8000-000000000003','hh','{"id":"20000000-0000-4000-8000-000000000003","code":"hh","name":"hh.ru (official API; access setup required)","enabled":true,"created_at":"2026-10-09T00:00:00.000Z","updated_at":"2026-10-09T00:00:00.000Z"}');

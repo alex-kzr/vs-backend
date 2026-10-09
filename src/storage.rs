@@ -205,13 +205,6 @@ fn query_error(code: &'static str) -> ApiError {
 }
 
 pub async fn read(c: &mut SqliteConnection, parts: &[&str], query: &str) -> Result<Value> {
-    if let ["search-configurations", id, "preview"] = parts {
-        if !query.is_empty() && query != "adapter=fixture-v1" {
-            return Err(query_error("invalid_query"));
-        }
-        let config = get(c, "search_configuration", id).await?;
-        return crate::adapters::preview(&config);
-    }
     if parts.len() == 2 {
         let t = table(parts[0])?;
         let data = get(c, t, parts[1]).await?;

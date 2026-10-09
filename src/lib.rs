@@ -1,5 +1,6 @@
 mod adapters;
 pub mod error;
+pub mod hh;
 mod ingestion;
 mod storage;
 mod validation;
@@ -26,6 +27,7 @@ pub struct AppState {
     pub pool: SqlitePool,
     pub hosts: Vec<String>,
     pub origins: Vec<String>,
+    pub hh: hh::HhClient,
 }
 
 pub async fn open_database(
@@ -120,6 +122,33 @@ async fn api(
     let method = request.method().clone();
     let query = request.uri().query().unwrap_or("").to_owned();
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if method == Method::GET && parts == ["hh", "status"] {
+        return Ok(axum::Json(s.hh.status()).into_response());
+    }
+    if method == Method::DELETE && parts.len() == 3 && parts[..2] == ["hh", "requests"] {
+        return Ok(axum::Json(s.hh.cancel(parts[2])?).into_response());
+    }
+    if method == Method::GET && parts == ["hh", "areas"] {
+        return Ok(axum::Json(s.hh.areas(&query).await?).into_response());
+    }
+    if method == Method::GET
+        && let ["search-configurations", id, "preview"] = parts.as_slice()
+    {
+        let args = hh::query::preview_query(&query)?;
+        let configuration = {
+            let mut transaction = s.pool.begin().await?;
+            let data = storage::get(&mut transaction, "search_configuration", id).await?;
+            transaction.commit().await?;
+            data
+        };
+        let value = if args.adapter == "hh" {
+            s.hh.preview(&configuration, args.page, args.request_id)
+                .await?
+        } else {
+            adapters::preview(&configuration)?
+        };
+        return Ok(axum::Json(value).into_response());
+    }
     if method == Method::GET {
         let mut connection = s.pool.begin().await?;
         let value = storage::read(&mut connection, &parts, &query).await?;

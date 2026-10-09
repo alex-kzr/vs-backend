@@ -144,7 +144,7 @@ pub fn email(v: &Value) -> Result<(Value, Value)> {
     }
     Ok((Value::Null, Value::Null))
 }
-fn array(v: &Value, k: &str, choices: Option<&[&str]>) -> Result<Value> {
+pub(crate) fn array(v: &Value, k: &str, choices: Option<&[&str]>) -> Result<Value> {
     let Some(a) = v.get(k) else {
         return Ok(json!([]));
     };
@@ -184,14 +184,19 @@ pub fn criteria(v: &Value) -> Result<Value> {
             "excluded_keywords",
             "locations",
             "technologies",
+            "hh",
             "work_formats",
             "employment_types",
         ],
     )?;
-    Ok(json!({"role":optional(v,"role",500)?,
+    let mut criteria = json!({"role":optional(v,"role",500)?,
         "keywords":array(v,"keywords",None)?,"excluded_keywords":array(v,"excluded_keywords",None)?,
         "locations":array(v,"locations",None)?,"technologies":array(v,"technologies",None)?,
-        "work_formats":array(v,"work_formats",Some(FORMATS))?,"employment_types":array(v,"employment_types",Some(EMPLOYMENT))?}))
+        "work_formats":array(v,"work_formats",Some(FORMATS))?,"employment_types":array(v,"employment_types",Some(EMPLOYMENT))?});
+    if let Some(hh) = v.get("hh") {
+        criteria["hh"] = crate::hh::query::normalize(hh)?;
+    }
+    Ok(criteria)
 }
 pub fn vacancy(v: &Value) -> Result<Value> {
     object(

@@ -12,6 +12,7 @@ pub struct ApiError {
     pub code: &'static str,
     pub message: String,
     pub fields: Value,
+    pub retry_after: Option<u64>,
 }
 impl ApiError {
     pub fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
@@ -20,7 +21,12 @@ impl ApiError {
             code,
             message: message.into(),
             fields: json!({}),
+            retry_after: None,
         }
+    }
+    pub fn with_retry_after(mut self, seconds: u64) -> Self {
+        self.retry_after = Some(seconds);
+        self
     }
     pub fn field(field: &str, message: &str) -> Self {
         let mut e = Self::new(
@@ -71,14 +77,17 @@ impl From<sqlx::Error> for ApiError {
 }
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let busy = self.status == StatusCode::SERVICE_UNAVAILABLE;
+        let retry_after = self
+            .retry_after
+            .or_else(|| (self.code == "database_busy").then_some(1));
         let mut response = (self.status, Json(json!({"error":{
-            "code":self.code,"message":self.message,"fields":self.fields,"request_id":Uuid::new_v4().to_string()
+            "code":self.code,"message":self.message,"fields":self.fields,"retry_after_seconds":retry_after,"request_id":Uuid::new_v4().to_string()
         }}))).into_response();
-        if busy {
+        if let Some(seconds) = retry_after {
             response.headers_mut().insert(
                 header::RETRY_AFTER,
-                axum::http::HeaderValue::from_static("1"),
+                axum::http::HeaderValue::from_str(&seconds.to_string())
+                    .unwrap_or_else(|_| axum::http::HeaderValue::from_static("60")),
             );
         }
         response

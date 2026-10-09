@@ -16,6 +16,9 @@ url = "2"
 base64 = "0.22"
 tower-http = { version = "0.6", features = ["fs", "set-header"] }
 
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"

@@ -28,13 +28,29 @@ pub fn normalize_vacancy_input(input: &Value) -> Result<Value> {
     let o = &input["observation"];
     v::object(
         o,
-        &["observation_key", "observed_at", "search_configuration_id"],
+        &[
+            "observation_key",
+            "observed_at",
+            "search_configuration_id",
+            "source_payload",
+        ],
     )?;
-    Ok(
-        json!({"source_id":v::uuid(input,"source_id")?,"external_vacancy_id":external,"external_url":url,
+    let mut normalized = json!({"source_id":v::uuid(input,"source_id")?,"external_vacancy_id":external,"external_url":url,
         "target_vacancy_id":v::optional_uuid(input,"target_vacancy_id")?,"vacancy":v::vacancy(&input["vacancy"])?,
-        "observation":{"observation_key":v::uuid(o,"observation_key")?,"observed_at":v::time(o,"observed_at")?,"search_configuration_id":v::optional_uuid(o,"search_configuration_id")?}}),
-    )
+        "observation":{"observation_key":v::uuid(o,"observation_key")?,"observed_at":v::time(o,"observed_at")?,"search_configuration_id":v::optional_uuid(o,"search_configuration_id")?}});
+    // Do not add defaults to old receipt shapes: existing exact retries must remain valid.
+    if let Some(payload) = o.get("source_payload") {
+        normalized["observation"]["source_payload"] = crate::hh::source_payload(payload)?;
+        if normalized["source_id"] != "20000000-0000-4000-8000-000000000003"
+            || payload["external_vacancy_id"] != normalized["external_vacancy_id"]
+        {
+            return Err(ApiError::field(
+                "source_payload",
+                "HH metadata must match the HH source and vacancy ID.",
+            ));
+        }
+    }
+    Ok(normalized)
 }
 async fn lookup(
     c: &mut SqliteConnection,
@@ -211,6 +227,7 @@ pub async fn vacancy(c: &mut SqliteConnection, input: &Value) -> Result<(Value, 
     .await?;
     let (discovery_id, duplicate) = if let Some(d) = existing {
         if d["normalized_payload"] != input["vacancy"]
+            || d["source_payload"] != observation["source_payload"]
             || d["observed_at"] != observation["observed_at"]
             || d["search_configuration_id"] != observation["search_configuration_id"]
         {
@@ -228,6 +245,9 @@ pub async fn vacancy(c: &mut SqliteConnection, input: &Value) -> Result<(Value, 
             json!({"vacancy_id":vacancy_id,"source_reference_id":reference_id,"search_configuration_id":observation["search_configuration_id"],
             "observation_key":observation["observation_key"],"observed_at":observation["observed_at"],"discovered_at":v::now(),"normalized_payload":input["vacancy"],"criteria_snapshot":snapshot}),
         );
+        if let Some(payload) = observation.get("source_payload") {
+            d["source_payload"] = payload.clone();
+        }
         d.as_object_mut()
             .ok_or_else(ApiError::internal)?
             .remove("updated_at");

@@ -26,6 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(address).await?;
     let state = AppState {
         pool: pool.clone(),
+        hh: vacancy_search_backend::hh::HhClient::from_env(),
         hosts: vec![format!("127.0.0.1:{port}"), format!("localhost:{port}")],
         origins: vec![
             format!("http://127.0.0.1:{port}"),

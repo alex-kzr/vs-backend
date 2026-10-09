@@ -25,6 +25,7 @@ impl TestApp {
                 pool: pool.clone(),
                 hosts: vec!["localhost".into()],
                 origins: vec!["http://localhost".into()],
+                hh: Default::default(),
             },
             None,
         );
@@ -665,6 +666,7 @@ async fn spa_deep_links_serve_index_with_success_without_masking_api_errors() {
             pool: t.pool.clone(),
             hosts: vec!["localhost".into()],
             origins: vec!["http://localhost".into()],
+            hh: Default::default(),
         },
         Some(&assets),
     );
