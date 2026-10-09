@@ -726,3 +726,129 @@ async fn spa_deep_links_serve_index_with_success_without_masking_api_errors() {
             .starts_with("application/json")
     );
 }
+
+#[tokio::test]
+async fn browser_profiles_keep_independent_queries_and_immutable_provenance() {
+    let a = TestApp::new().await;
+    let first=a.post("search-configurations",json!({"name":"Synthetic AI agents","criteria_version":1,"criteria":{"queries":["!agentic"],"work_formats":["remote"]}})).await;
+    let second=a.post("search-configurations",json!({"name":"Synthetic Rust","criteria_version":1,"criteria":{"queries":["Rust"],"work_formats":["remote"]}})).await;
+    let first_id = first["id"].as_str().unwrap();
+    let second_id = second["id"].as_str().unwrap();
+    let company = a.company("Synthetic browser employer").await;
+    let body = json!({"source_id":"20000000-0000-4000-8000-000000000004","external_vacancy_id":"990000000000011","external_url":"https://hh.ru/vacancy/990000000000011",
+        "vacancy":{"company_id":company["id"],"title":"Synthetic Agent Engineer","work_format":"remote"},
+        "observation":{"observation_key":uuid::Uuid::new_v4().to_string(),"observed_at":"2026-10-09T12:00:00Z","search_configuration_id":first["id"],
+        "source_payload":{"provider":"hh-browser","external_vacancy_id":"990000000000011","source_url":"https://hh.ru/vacancy/990000000000011","employer_name":"Synthetic browser employer",
+        "published_date":"2026-10-08","queries":["!agentic"],"reviewed_at":"2026-10-09T12:00:00Z","relevance_reason":"Synthetic agent tools implementation.",
+        "remote_evidence":"Synthetic remote-only header.","eligibility_notes":"Country eligibility unspecified.","classification":"relevant"}}});
+    let created = a.post("vacancy-source-references", body.clone()).await;
+    let (_, duplicate) = a
+        .call(
+            "POST",
+            "vacancy-source-references",
+            body.clone(),
+            Some(&uuid::Uuid::new_v4().to_string()),
+        )
+        .await;
+    assert_eq!(duplicate["data"]["vacancy_id"], created["vacancy_id"]);
+    assert_eq!(
+        a.get(&format!("vacancies?search_configuration_id={first_id}"))
+            .await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        a.get(&format!("vacancies?search_configuration_id={second_id}"))
+            .await["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let (status, result) = a
+        .call(
+            "PATCH",
+            &format!("search-configurations/{first_id}"),
+            json!({"criteria":{"queries":["LangGraph"],"work_formats":["remote"]}}),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(
+        a.get(&format!("search-configurations/{second_id}")).await["data"]["criteria"]["queries"],
+        json!(["Rust"])
+    );
+    let history = a
+        .get(&format!(
+            "vacancies/{}/discoveries",
+            created["vacancy_id"].as_str().unwrap()
+        ))
+        .await;
+    assert_eq!(history["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        history["items"][0]["criteria_snapshot"]["criteria"]["queries"],
+        json!(["!agentic"])
+    );
+    assert_eq!(
+        history["items"][0]["source_payload"]["provider"],
+        "hh-browser"
+    );
+    let mut changed = body.clone();
+    changed["observation"]["source_payload"]["relevance_reason"] = json!("Changed assessment.");
+    assert_eq!(
+        a.call(
+            "POST",
+            "vacancy-source-references",
+            changed,
+            Some(&uuid::Uuid::new_v4().to_string())
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    for (path, value) in [
+        (vec!["external_url"], json!("https://hh.ru/vacancy/99")),
+        (
+            vec!["observation", "source_payload", "source_url"],
+            json!("https://hh.ru/vacancy/990000000000011?token=invalid"),
+        ),
+        (
+            vec!["observation", "source_payload", "published_date"],
+            json!("2026-02-30"),
+        ),
+        (
+            vec!["observation", "source_payload", "unknown"],
+            json!("invalid"),
+        ),
+        (vec!["vacancy", "work_format"], json!("hybrid")),
+    ] {
+        let mut invalid = body.clone();
+        let mut current = &mut invalid;
+        for key in path {
+            current = &mut current[key];
+        }
+        *current = value;
+        assert_eq!(
+            a.call(
+                "POST",
+                "vacancy-source-references",
+                invalid,
+                Some(&uuid::Uuid::new_v4().to_string())
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    for queries in [json!(["duplicate", "duplicate"]), json!([""]), json!([123])] {
+        assert_eq!(a.call("POST","search-configurations",json!({"name":"Invalid queries","criteria_version":1,"criteria":{"queries":queries}}),Some(&uuid::Uuid::new_v4().to_string())).await.0,StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let legacy = a
+        .post(
+            "search-configurations",
+            json!({"name":"Synthetic legacy","criteria_version":1,"criteria":{}}),
+        )
+        .await;
+    assert!(legacy["criteria"].get("queries").is_none());
+}

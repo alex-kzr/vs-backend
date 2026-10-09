@@ -1,4 +1,5 @@
 mod adapters;
+mod browser_review;
 pub mod error;
 pub mod hh;
 mod ingestion;

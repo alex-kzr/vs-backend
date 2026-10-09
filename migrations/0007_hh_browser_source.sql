@@ -1,0 +1,1 @@
+INSERT INTO vacancy_source(id,code,data) VALUES ('20000000-0000-4000-8000-000000000004','hh-browser','{"id":"20000000-0000-4000-8000-000000000004","code":"hh-browser","name":"hh.ru (user-directed browser review)","enabled":true,"created_at":"2026-10-09T00:00:00.000Z","updated_at":"2026-10-09T00:00:00.000Z"}');

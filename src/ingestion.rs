@@ -40,15 +40,49 @@ pub fn normalize_vacancy_input(input: &Value) -> Result<Value> {
         "observation":{"observation_key":v::uuid(o,"observation_key")?,"observed_at":v::time(o,"observed_at")?,"search_configuration_id":v::optional_uuid(o,"search_configuration_id")?}});
     // Do not add defaults to old receipt shapes: existing exact retries must remain valid.
     if let Some(payload) = o.get("source_payload") {
-        normalized["observation"]["source_payload"] = crate::hh::source_payload(payload)?;
-        if normalized["source_id"] != "20000000-0000-4000-8000-000000000003"
+        let (source_id, metadata) = match payload["provider"].as_str() {
+            Some("hh") => (
+                "20000000-0000-4000-8000-000000000003",
+                crate::hh::source_payload(payload)?,
+            ),
+            Some("hh-browser") => (
+                crate::browser_review::SOURCE_ID,
+                crate::browser_review::source_payload(payload)?,
+            ),
+            _ => {
+                return Err(ApiError::field(
+                    "source_payload",
+                    "Unsupported provenance provider.",
+                ));
+            }
+        };
+        if source_id == crate::browser_review::SOURCE_ID
+            && (metadata["source_url"] != normalized["external_url"]
+                || (metadata["classification"] == "relevant"
+                    && normalized["vacancy"]["work_format"] != "remote"))
+        {
+            return Err(ApiError::field(
+                "source_payload",
+                "Browser review requires its canonical URL; relevant reviews require remote format.",
+            ));
+        }
+        normalized["observation"]["source_payload"] = metadata;
+        if normalized["source_id"] != source_id
             || payload["external_vacancy_id"] != normalized["external_vacancy_id"]
         {
             return Err(ApiError::field(
                 "source_payload",
-                "HH metadata must match the HH source and vacancy ID.",
+                "Metadata must match the declared source and vacancy ID.",
             ));
         }
+    }
+    if normalized["source_id"] == crate::browser_review::SOURCE_ID
+        && o.get("source_payload").is_none()
+    {
+        return Err(ApiError::field(
+            "source_payload",
+            "Browser review provenance is required for this source.",
+        ));
     }
     Ok(normalized)
 }

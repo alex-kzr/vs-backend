@@ -185,6 +185,7 @@ pub fn criteria(v: &Value) -> Result<Value> {
             "locations",
             "technologies",
             "hh",
+            "queries",
             "work_formats",
             "employment_types",
         ],
@@ -193,6 +194,9 @@ pub fn criteria(v: &Value) -> Result<Value> {
         "keywords":array(v,"keywords",None)?,"excluded_keywords":array(v,"excluded_keywords",None)?,
         "locations":array(v,"locations",None)?,"technologies":array(v,"technologies",None)?,
         "work_formats":array(v,"work_formats",Some(FORMATS))?,"employment_types":array(v,"employment_types",Some(EMPLOYMENT))?});
+    if v.get("queries").is_some() {
+        criteria["queries"] = array(v, "queries", None)?;
+    }
     if let Some(hh) = v.get("hh") {
         criteria["hh"] = crate::hh::query::normalize(hh)?;
     }
