@@ -599,3 +599,56 @@ async fn failing_migration_is_atomic_and_not_marked_applied() {
     assert_eq!(count, 0);
     pool.close().await;
 }
+
+#[tokio::test]
+async fn concurrent_source_discoveries_keep_one_vacancy_and_two_observations() {
+    let t = TestApp::new().await;
+    let company = t.company("Source race").await;
+    let a = input(&company, "same-job");
+    let b = input(&company, "same-job");
+    let keya = uuid::Uuid::new_v4().to_string();
+    let keyb = uuid::Uuid::new_v4().to_string();
+    let (a, b) = tokio::join!(
+        t.call("POST", "vacancy-source-references", a, Some(&keya)),
+        t.call("POST", "vacancy-source-references", b, Some(&keyb))
+    );
+    assert_eq!((a.0, b.0), (StatusCode::CREATED, StatusCode::CREATED));
+    assert_eq!(a.1["data"]["vacancy_id"], b.1["data"]["vacancy_id"]);
+    assert_eq!(
+        t.get("vacancies").await["items"].as_array().unwrap().len(),
+        1
+    );
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vacancy_discovery")
+        .fetch_one(&t.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+}
+#[tokio::test]
+async fn locked_database_is_retryable_and_has_no_partial_receipt() {
+    use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
+    let t = TestApp::new().await;
+    let mut blocker = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new().filename(t._dir.path().join("test.sqlite3")),
+    )
+    .await
+    .unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut blocker)
+        .await
+        .unwrap();
+    let key = uuid::Uuid::new_v4().to_string();
+    let body = json!({"name":"Retry lock"});
+    let (status, error) = t.call("POST", "companies", body.clone(), Some(&key)).await;
+    assert_eq!(
+        (status, error["error"]["code"].clone()),
+        (StatusCode::SERVICE_UNAVAILABLE, json!("database_busy"))
+    );
+    sqlx::query("ROLLBACK").execute(&mut blocker).await.unwrap();
+    let (status, _) = t.call("POST", "companies", body, Some(&key)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        t.get("companies").await["items"].as_array().unwrap().len(),
+        1
+    );
+}
