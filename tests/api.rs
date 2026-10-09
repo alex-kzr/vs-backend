@@ -652,3 +652,75 @@ async fn locked_database_is_retryable_and_has_no_partial_receipt() {
         1
     );
 }
+
+#[tokio::test]
+async fn spa_deep_links_serve_index_with_success_without_masking_api_errors() {
+    let t = TestApp::new().await;
+    let assets = t._dir.path().join("assets");
+    std::fs::create_dir(&assets).unwrap();
+    std::fs::write(assets.join("index.html"), "<html>synthetic SPA</html>").unwrap();
+    std::fs::write(assets.join("app.js"), "console.log('fixture');").unwrap();
+    let app = router(
+        AppState {
+            pool: t.pool.clone(),
+            hosts: vec!["localhost".into()],
+            origins: vec!["http://localhost".into()],
+        },
+        Some(&assets),
+    );
+    for path in ["/", "/vacancies", "/contacts/example?panel=history"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("host", "localhost")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert!(
+            response.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/html")
+        );
+        let bytes = to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(bytes.as_ref(), b"<html>synthetic SPA</html>");
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/app.js")
+                .header("host", "localhost")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        to_bytes(response.into_body(), 1024).await.unwrap().as_ref(),
+        b"console.log('fixture');"
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/no-such-resource")
+                .header("host", "localhost")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(
+        response.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("application/json")
+    );
+}

@@ -59,7 +59,7 @@ pub fn router(state: AppState, assets: Option<&FilePath>) -> Router {
         .route("/api/health", any(health))
         .with_state(state);
     if let Some(path) = assets {
-        app = app.fallback_service(tower_http::services::ServeDir::new(path).not_found_service(
+        app = app.fallback_service(tower_http::services::ServeDir::new(path).fallback(
             tower_http::services::ServeFile::new(path.join("index.html")),
         ));
     }
