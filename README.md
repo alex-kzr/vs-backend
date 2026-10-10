@@ -23,7 +23,7 @@ cargo test --locked
 cargo build --release --locked
 ```
 
-Tests use disposable file databases and synthetic data. They cover identity, retries, race, rollback, timeline high-water marks, upgrade/checksum/failure, integrity and stopped-copy restoration. HH tests use loopback HTTP mocks for headers/query/mapping, errors, limits, cooldown and cancellation. Current gate: 17 unit + 19 file-backed integration tests pass.
+Tests use disposable file databases and synthetic data. They cover identity, retries, race, rollback, timeline high-water marks, upgrade/checksum/failure, integrity and stopped-copy restoration. HH tests use loopback HTTP mocks for headers/query/mapping, errors, limits, cooldown and cancellation. Current gate: 17 unit + 26 file-backed integration tests pass.
 
 ## Boundaries
 
@@ -40,3 +40,7 @@ Shared API/architecture and current limitations are maintained in the umbrella d
 ## Refusal compatibility
 
 Migration 8 preserves legacy rejected without inferring a party and adds declined_by_applicant / rejected_by_employer to API and SQLite validation. PATCH status changes append transactional history; GET /api/v1/vacancies/{id}/status-history reads it. Notes-only and same-status saves append no event. See ../../docs/architecture/localization-and-statuses.md.
+
+## Multi-value filters
+
+Lists support repeated status/company_id query keys for vacancies, and repeated company_id for contacts/conversations. OR within a selection, AND between filters. Empty selection omits the filter. Validation, canonical cursor binding, scalar URL compatibility and limits are documented in ../../docs/roadmap/multi-filters.md. No database migration is needed.

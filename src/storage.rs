@@ -241,11 +241,34 @@ pub async fn read(c: &mut SqliteConnection, parts: &[&str], query: &str) -> Resu
         }
         _ => return Err(ApiError::missing()),
     };
+    if query.len() > 16_384 {
+        return Err(query_error("invalid_query"));
+    }
     let mut args = BTreeMap::new();
+    let mut selections: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (k, value) in url::form_urlencoded::parse(query.as_bytes()) {
-        if args.insert(k.to_string(), value.to_string()).is_some() {
+        let multiple = (k == "status" && t == "vacancy")
+            || (k == "company_id" && matches!(t, "vacancy" | "contact" | "conversation"));
+        if multiple {
+            if (k == "status" && !v::STATUSES.contains(&value.as_ref()))
+                || (k == "company_id" && uuid::Uuid::parse_str(&value).is_err())
+            {
+                return Err(query_error("invalid_query"));
+            }
+            let values = selections.entry(k.into_owned()).or_default();
+            if values.len() >= 100 {
+                return Err(query_error("invalid_query"));
+            }
+            values.push(value.into_owned());
+        } else if args.insert(k.into_owned(), value.into_owned()).is_some() {
             return Err(query_error("invalid_query"));
         }
+    }
+    for (key, mut values) in selections {
+        values.sort();
+        values.dedup();
+        // Keep scalar cursor fingerprints compatible; selection order is immaterial.
+        args.insert(key, values.join(","));
     }
     let limit = args
         .remove("limit")
@@ -276,9 +299,8 @@ pub async fn read(c: &mut SqliteConnection, parts: &[&str], query: &str) -> Resu
         return Err(query_error("invalid_query"));
     }
     for (k, value) in &args {
-        if (k.ends_with("_id") && uuid::Uuid::parse_str(value).is_err())
+        if (k.ends_with("_id") && k != "company_id" && uuid::Uuid::parse_str(value).is_err())
             || (k == "q" && (value.trim().is_empty() || value.chars().count() > 200))
-            || (k == "status" && !v::STATUSES.contains(&value.as_str()))
             || (k == "enabled" && !["true", "false"].contains(&value.as_str()))
         {
             return Err(query_error("invalid_query"));
@@ -345,9 +367,18 @@ pub async fn read(c: &mut SqliteConnection, parts: &[&str], query: &str) -> Resu
                 sql.push_str(" AND EXISTS(SELECT 1 FROM vacancy_discovery d WHERE d.vacancy_id=r.id AND d.search_configuration_id=?)");
                 binds.push(value.clone());
             }
-            "status" => {
-                sql.push_str(" AND json_extract(data,'$.status')=?");
-                binds.push(value.clone());
+            "status" | "company_id" => {
+                let values: Vec<_> = value.split(',').collect();
+                let column = if k == "status" {
+                    "json_extract(data,'$.status')"
+                } else {
+                    "r.company_id"
+                };
+                sql.push_str(&format!(
+                    " AND {column} IN ({})",
+                    vec!["?"; values.len()].join(",")
+                ));
+                binds.extend(values.into_iter().map(str::to_owned));
             }
             _ => {
                 sql.push_str(&format!(" AND {k}=?"));

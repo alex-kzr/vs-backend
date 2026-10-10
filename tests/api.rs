@@ -1216,3 +1216,173 @@ async fn refusal_migration_foreign_key_guard_rolls_back_rebuild() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn multiple_statuses_and_companies_use_or_within_and_between_filters() {
+    let t = TestApp::new().await;
+    let companies = [
+        t.company("Alpha").await,
+        t.company("Beta").await,
+        t.company("Gamma").await,
+    ];
+    let config = t
+        .post(
+            "search-configurations",
+            json!({"name":"Multi fixture","criteria_version":1,"criteria":{"keywords":["Rust"]}}),
+        )
+        .await;
+    let mut expected = std::collections::BTreeSet::new();
+    for (index, company) in companies.iter().enumerate() {
+        for status in ["new", "saved", "declined_by_applicant"] {
+            let mut body = input(company, &format!("multi-{index}-{status}"));
+            body["observation"]["search_configuration_id"] = config["id"].clone();
+            let record = t.post("vacancy-source-references", body).await;
+            let id = record["vacancy_id"].as_str().unwrap();
+            if status != "new" {
+                assert_eq!(
+                    t.call(
+                        "PATCH",
+                        &format!("vacancies/{id}"),
+                        json!({"status":status}),
+                        None
+                    )
+                    .await
+                    .0,
+                    StatusCode::OK
+                );
+            }
+            if index < 2 && status != "declined_by_applicant" {
+                expected.insert(id.to_owned());
+            }
+        }
+    }
+    let a = companies[0]["id"].as_str().unwrap();
+    let b = companies[1]["id"].as_str().unwrap();
+    let profile = config["id"].as_str().unwrap();
+    let query = format!(
+        "vacancies?company_id={a}&company_id={b}&status=new&status=saved&q=Rust&source_id=20000000-0000-4000-8000-000000000001&search_configuration_id={profile}"
+    );
+    let page = t.get(&query).await;
+    let actual: std::collections::BTreeSet<_> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(actual, expected);
+    assert_eq!(
+        t.get("vacancies").await["items"].as_array().unwrap().len(),
+        9
+    );
+    assert_eq!(
+        t.get(&format!("vacancies?company_id={a}&status=saved"))
+            .await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        t.get(&format!("{query}&limit=1")).await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let empty = t.get(&query.replace("q=Rust", "q=missing")).await;
+    assert_eq!(empty["items"], json!([]));
+}
+
+#[tokio::test]
+async fn multi_filter_cursor_is_order_independent_and_rejects_changed_selections() {
+    let t = TestApp::new().await;
+    let a = t.company("Alpha").await;
+    let b = t.company("Beta").await;
+    for (i, company) in [&a, &b, &a, &b].iter().enumerate() {
+        t.post(
+            "vacancy-source-references",
+            input(company, &format!("page-{i}")),
+        )
+        .await;
+    }
+    let a = a["id"].as_str().unwrap();
+    let b = b["id"].as_str().unwrap();
+    let query = format!("vacancies?company_id={a}&company_id={b}&status=new&status=saved&limit=1");
+    let mut page = t.get(&query).await;
+    let mut ids = std::collections::BTreeSet::new();
+    loop {
+        assert!(ids.insert(page["items"][0]["id"].as_str().unwrap().to_owned()));
+        let Some(cursor) = page["next_cursor"].as_str() else {
+            break;
+        };
+        let changed =
+            format!("vacancies?company_id={a}&status=new&status=saved&limit=1&cursor={cursor}");
+        assert_eq!(
+            t.call("GET", &changed, Value::Null, None).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        let reordered = format!(
+            "vacancies?status=saved&status=new&status=new&company_id={b}&company_id={a}&limit=1&cursor={cursor}"
+        );
+        page = t.get(&reordered).await;
+    }
+    assert_eq!(ids.len(), 4);
+    let first = t
+        .get(&format!("vacancies?company_id={a}&status=new&limit=1"))
+        .await;
+    let cursor = first["next_cursor"].as_str().unwrap();
+    let duplicate_scalar = t
+        .get(&format!(
+            "vacancies?company_id={a}&company_id={a}&status=new&status=new&limit=1&cursor={cursor}"
+        ))
+        .await;
+    assert_ne!(first["items"][0]["id"], duplicate_scalar["items"][0]["id"]);
+}
+
+#[tokio::test]
+async fn multi_company_filter_is_shared_and_invalid_lists_are_rejected() {
+    let t = TestApp::new().await;
+    let companies = [
+        t.company("Alpha").await,
+        t.company("Beta").await,
+        t.company("Gamma").await,
+    ];
+    for company in &companies {
+        t.post(
+            "contacts",
+            json!({"company_id":company["id"],"display_name":"Recruiter"}),
+        )
+        .await;
+        t.conversation(company).await;
+    }
+    let a = companies[0]["id"].as_str().unwrap();
+    let b = companies[1]["id"].as_str().unwrap();
+    for resource in ["contacts", "conversations"] {
+        assert_eq!(
+            t.get(&format!("{resource}?company_id={a}&company_id={b}"))
+                .await["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+    for query in [
+        "vacancies?status=new&status=unsupported".to_owned(),
+        format!("vacancies?company_id={a}&company_id=invalid"),
+        format!("vacancies?company_id={a},{b}"),
+        "vacancies?q=Rust&q=Other".to_owned(),
+        "companies?status=new&status=saved".to_owned(),
+        format!(
+            "vacancies?{}",
+            vec![format!("company_id={a}"); 101].join("&")
+        ),
+    ] {
+        let (status, error) = t.call("GET", &query, Value::Null, None).await;
+        assert_eq!(
+            (status, error["error"]["code"].clone()),
+            (StatusCode::BAD_REQUEST, json!("invalid_query")),
+            "{query}"
+        );
+    }
+}
