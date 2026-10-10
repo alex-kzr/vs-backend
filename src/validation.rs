@@ -4,7 +4,15 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use uuid::Uuid;
 
-pub const STATUSES: &[&str] = &["new", "saved", "contacted", "rejected", "archived"];
+pub const STATUSES: &[&str] = &[
+    "new",
+    "saved",
+    "contacted",
+    "declined_by_applicant",
+    "rejected_by_employer",
+    "rejected", // Legacy / compatible API input; never infer the refusing party.
+    "archived",
+];
 pub const FORMATS: &[&str] = &["remote", "hybrid", "onsite"];
 pub const EMPLOYMENT: &[&str] = &[
     "full_time",

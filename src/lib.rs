@@ -18,7 +18,7 @@ use axum::{
 use error::{ApiError, Result};
 use serde_json::{Value, json};
 use sqlx::{
-    SqlitePool,
+    Connection, SqliteConnection, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use std::{path::Path as FilePath, time::Duration};
@@ -44,17 +44,33 @@ pub async fn open_database(
         .busy_timeout(Duration::from_secs(5))
         .journal_mode(SqliteJournalMode::Delete)
         .synchronous(SqliteSynchronous::Full);
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(options)
+    // Table rebuilds require FK checks off before the migration transaction.
+    // This connection is never exposed to HTTP handlers or returned to the pool.
+    let migration_options = options.clone().foreign_keys(false);
+    let mut migration = SqliteConnection::connect_with(&migration_options).await?;
+    sqlx::migrate!().run(&mut migration).await?;
+    if !sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(&mut migration)
+        .await?
+        .is_empty()
+    {
+        return Err(
+            std::io::Error::other("Database relationships failed integrity validation.").into(),
+        );
+    }
+    sqlx::query("PRAGMA foreign_keys=ON")
+        .execute(&mut migration)
         .await?;
-    sqlx::migrate!().run(&pool).await?;
-    let mut transaction = pool.begin().await?;
+    let mut transaction = migration.begin().await?;
     storage::backfill_search(&mut transaction)
         .await
         .map_err(|e| std::io::Error::other(e.message))?;
     transaction.commit().await?;
-    Ok(pool)
+    migration.close().await?;
+    Ok(SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await?)
 }
 pub fn router(state: AppState, assets: Option<&FilePath>) -> Router {
     let mut app = Router::new()

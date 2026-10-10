@@ -852,3 +852,367 @@ async fn browser_profiles_keep_independent_queries_and_immutable_provenance() {
         .await;
     assert!(legacy["criteria"].get("queries").is_none());
 }
+
+#[tokio::test]
+async fn refusal_statuses_round_trip_filter_history_and_restart() {
+    let t = TestApp::new().await;
+    let company = t.company("Status fixture").await;
+    let observation = input(&company, "refusal-round-trip");
+    let created = t
+        .post("vacancy-source-references", observation.clone())
+        .await;
+    let id = created["vacancy_id"].as_str().unwrap();
+    let path = format!("vacancies/{id}");
+    let mut previous = "new";
+    let statuses = [
+        "declined_by_applicant",
+        "rejected_by_employer",
+        "saved",
+        "contacted",
+        "archived",
+        "rejected",
+        "new",
+    ];
+    for status in statuses {
+        let (code, result) = t
+            .call(
+                "PATCH",
+                &path,
+                json!({"status":status,"notes":"Test only"}),
+                None,
+            )
+            .await;
+        assert_eq!(code, StatusCode::OK, "{result}");
+        assert_eq!(result["data"]["status"], status);
+        let filtered = t.get(&format!("vacancies?status={status}")).await;
+        assert_eq!(filtered["items"][0]["id"], id);
+        let history = t.get(&format!("{path}/status-history")).await;
+        let latest = &history["items"][0];
+        assert_eq!(latest["previous_status"], previous);
+        assert_eq!(latest["status"], status);
+        previous = status;
+    }
+    // Equal timestamps must not scramble the transition chain.
+    sqlx::query("UPDATE vacancy_status_history SET data=json_set(data,'$.changed_at','2026-10-09T12:00:00.000Z') WHERE vacancy_id=?")
+        .bind(id).execute(&t.pool).await.unwrap();
+    let tied = t.get(&format!("{path}/status-history")).await;
+    let actual: Vec<&str> = tied["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["status"].as_str().unwrap())
+        .collect();
+    assert_eq!(actual, statuses.into_iter().rev().collect::<Vec<_>>());
+    let original_history = t.get(&format!("{path}/status-history")).await;
+    t.call(
+        "PATCH",
+        &path,
+        json!({"status":"new","notes":"Only notes changed"}),
+        None,
+    )
+    .await;
+    assert_eq!(
+        t.get(&format!("{path}/status-history")).await,
+        original_history
+    );
+    let (code, _) = t
+        .call("PATCH", &path, json!({"status":"declined"}), None)
+        .await;
+    assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+    let (code, _) = t
+        .call("GET", "vacancies?status=declined", Value::Null, None)
+        .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    t.call(
+        "PATCH",
+        &path,
+        json!({"status":"rejected_by_employer"}),
+        None,
+    )
+    .await;
+    let mut next = observation;
+    next["observation"]["observation_key"] = json!(uuid::Uuid::new_v4().to_string());
+    t.post("vacancy-source-references", next).await;
+    assert_eq!(t.get(&path).await["data"]["status"], "rejected_by_employer");
+    let before_restart = t.get(&format!("{path}/status-history")).await;
+    t.pool.close().await;
+    let pool = open_database(&t._dir.path().join("test.sqlite3"))
+        .await
+        .unwrap();
+    let reopened = TestApp {
+        app: router(
+            AppState {
+                pool: pool.clone(),
+                hosts: vec!["localhost".into()],
+                origins: vec!["http://localhost".into()],
+                hh: Default::default(),
+            },
+            None,
+        ),
+        pool,
+        _dir: t._dir,
+    };
+    assert_eq!(
+        reopened.get(&path).await["data"]["status"],
+        "rejected_by_employer"
+    );
+    assert_eq!(
+        reopened.get(&format!("{path}/status-history")).await,
+        before_restart
+    );
+    let page = reopened
+        .get(&format!("{path}/status-history?limit=2"))
+        .await;
+    let next = reopened
+        .get(&format!(
+            "{path}/status-history?limit=100&cursor={}",
+            page["next_cursor"].as_str().unwrap()
+        ))
+        .await;
+    assert_eq!(
+        page["items"].as_array().unwrap().len() + next["items"].as_array().unwrap().len(),
+        8
+    );
+}
+
+#[tokio::test]
+async fn migration_seven_preserves_legacy_refusal_relationships_and_sequence() {
+    use sqlx::sqlite::SqliteConnectOptions;
+    let dir = tempfile::tempdir().unwrap();
+    let old = dir.path().join("old-migrations");
+    std::fs::create_dir(&old).unwrap();
+    for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations")).unwrap() {
+        let entry = entry.unwrap();
+        let filename = entry.file_name();
+        if filename.to_str().unwrap()[..4].parse::<u32>().unwrap() <= 7 {
+            std::fs::copy(entry.path(), old.join(filename)).unwrap();
+        }
+    }
+    let db = dir.path().join("test.sqlite3");
+    let pool = SqlitePool::connect_with(
+        SqliteConnectOptions::new()
+            .filename(&db)
+            .create_if_missing(true)
+            .foreign_keys(true),
+    )
+    .await
+    .unwrap();
+    sqlx::migrate::Migrator::new(old.as_path())
+        .await
+        .unwrap()
+        .run(&pool)
+        .await
+        .unwrap();
+    let t = TestApp {
+        app: router(
+            AppState {
+                pool: pool.clone(),
+                hosts: vec!["localhost".into()],
+                origins: vec!["http://localhost".into()],
+                hh: Default::default(),
+            },
+            None,
+        ),
+        pool,
+        _dir: dir,
+    };
+    let company = t.company("Legacy relationship fixture").await;
+    let created = t
+        .post(
+            "vacancy-source-references",
+            input(&company, "legacy-refusal"),
+        )
+        .await;
+    let id = created["vacancy_id"].as_str().unwrap();
+    sqlx::query("UPDATE vacancy SET data=json_set(data,'$.status','rejected','$.notes','Legacy note') WHERE id=?").bind(id).execute(&t.pool).await.unwrap();
+    let conversation=t.post("conversations",json!({"company_id":company["id"],"vacancy_id":id,"channel_id":"a0000000-0000-4000-8000-000000000001","participants":[{"participant_key":"self","participant_kind":"user"}]})).await;
+    t.post(
+        &format!(
+            "conversations/{}/messages",
+            conversation["id"].as_str().unwrap()
+        ),
+        message(&conversation, "2026-10-09T12:00:00Z"),
+    )
+    .await;
+    sqlx::query("UPDATE sqlite_sequence SET seq=1000 WHERE name='vacancy'")
+        .execute(&t.pool)
+        .await
+        .unwrap();
+    let before = t.get(&format!("vacancies/{id}")).await;
+    let discoveries = t.get(&format!("vacancies/{id}/discoveries")).await;
+    t.pool.close().await;
+    let pool = open_database(&db).await.unwrap();
+    let migrated = TestApp {
+        app: router(
+            AppState {
+                pool: pool.clone(),
+                hosts: vec!["localhost".into()],
+                origins: vec!["http://localhost".into()],
+                hh: Default::default(),
+            },
+            None,
+        ),
+        pool,
+        _dir: t._dir,
+    };
+    assert_eq!(migrated.get(&format!("vacancies/{id}")).await, before);
+    assert_eq!(
+        migrated.get(&format!("vacancies/{id}/discoveries")).await,
+        discoveries
+    );
+    assert_eq!(
+        migrated.get("vacancies?status=rejected").await["items"][0]["status"],
+        "rejected"
+    );
+    assert!(
+        migrated
+            .get(&format!("vacancies/{id}/status-history"))
+            .await["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let sequence: i64 = sqlx::query_scalar("SELECT seq FROM sqlite_sequence WHERE name='vacancy'")
+        .fetch_one(&migrated.pool)
+        .await
+        .unwrap();
+    assert_eq!(sequence, 1000);
+    let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+        .fetch_one(&migrated.pool)
+        .await
+        .unwrap();
+    assert_eq!(foreign_keys, 1);
+    assert!(
+        sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&migrated.pool)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    for status in ["declined_by_applicant", "rejected_by_employer"] {
+        sqlx::query("UPDATE vacancy SET data=json_set(data,'$.status',?) WHERE id=?")
+            .bind(status)
+            .bind(id)
+            .execute(&migrated.pool)
+            .await
+            .unwrap();
+    }
+    for status in [Some("invalid"), None] {
+        assert!(
+            sqlx::query("UPDATE vacancy SET data=json_set(data,'$.status',?) WHERE id=?")
+                .bind(status)
+                .bind(id)
+                .execute(&migrated.pool)
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(
+        migrated
+            .get(&format!(
+                "conversations/{}",
+                conversation["id"].as_str().unwrap()
+            ))
+            .await["data"]["vacancy_id"],
+        id
+    );
+    let empty_path = migrated._dir.path().join("empty-with-sequence.sqlite3");
+    let empty = SqlitePool::connect_with(
+        SqliteConnectOptions::new()
+            .filename(&empty_path)
+            .create_if_missing(true)
+            .foreign_keys(true),
+    )
+    .await
+    .unwrap();
+    sqlx::migrate::Migrator::new(old.as_path())
+        .await
+        .unwrap()
+        .run(&empty)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO sqlite_sequence(name,seq) VALUES('vacancy',2000)")
+        .execute(&empty)
+        .await
+        .unwrap();
+    empty.close().await;
+    let empty = open_database(&empty_path).await.unwrap();
+    let sequence: i64 = sqlx::query_scalar("SELECT seq FROM sqlite_sequence WHERE name='vacancy'")
+        .fetch_one(&empty)
+        .await
+        .unwrap();
+    assert_eq!(sequence, 2000);
+}
+
+#[tokio::test]
+async fn refusal_migration_foreign_key_guard_rolls_back_rebuild() {
+    use sqlx::sqlite::SqliteConnectOptions;
+    let dir = tempfile::tempdir().unwrap();
+    let old = dir.path().join("old");
+    std::fs::create_dir(&old).unwrap();
+    for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations")).unwrap() {
+        let entry = entry.unwrap();
+        let filename = entry.file_name();
+        if filename.to_str().unwrap()[..4].parse::<u32>().unwrap() <= 7 {
+            std::fs::copy(entry.path(), old.join(filename)).unwrap();
+        }
+    }
+    let path = dir.path().join("invalid.sqlite3");
+    let pool = SqlitePool::connect_with(
+        SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .foreign_keys(false),
+    )
+    .await
+    .unwrap();
+    sqlx::migrate::Migrator::new(old.as_path())
+        .await
+        .unwrap()
+        .run(&pool)
+        .await
+        .unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let missing_company = uuid::Uuid::new_v4().to_string();
+    let original=json!({"id":id,"company_id":missing_company,"status":"rejected","title":"Broken fixture","created_at":"2026-10-09T12:00:00.000Z"}).to_string();
+    sqlx::query("INSERT INTO vacancy(id,company_id,data) VALUES(?,?,?)")
+        .bind(&id)
+        .bind(&missing_company)
+        .bind(&original)
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    assert!(open_database(&path).await.is_err());
+    let pool = SqlitePool::connect_with(
+        SqliteConnectOptions::new()
+            .filename(&path)
+            .foreign_keys(false),
+    )
+    .await
+    .unwrap();
+    let retained: String = sqlx::query_scalar("SELECT data FROM vacancy WHERE id=?")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(retained, original);
+    let version: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE version=8")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(version, 0);
+    let history: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name='vacancy_status_history'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(history, 0);
+    assert!(
+        sqlx::query("UPDATE vacancy SET data=json_set(data,'$.status','declined_by_applicant')")
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+}

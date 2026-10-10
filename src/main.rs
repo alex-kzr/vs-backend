@@ -21,9 +21,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !assets.join("index.html").exists() {
         eprintln!("Frontend assets absent; API available. Set VACANCY_ASSETS or build frontend.");
     }
-    let pool = open_database(&data).await?;
+    // Bind before migrating so a port conflict cannot mutate the database.
     let address = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(address).await?;
+    let pool = open_database(&data).await?;
     let state = AppState {
         pool: pool.clone(),
         hh: vacancy_search_backend::hh::HhClient::from_env(),

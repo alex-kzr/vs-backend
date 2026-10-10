@@ -10,7 +10,7 @@ From this repository:
 cargo run --locked
 ```
 
-Default URL: http://127.0.0.1:48173. Build frontend first in ../frontend with npm ci and npm run build. Backend serves ../frontend/dist with SPA fallback. Database defaults to LOCALAPPDATA/VacancySearch/vacancy.sqlite3 (outside checkout). Optional process environment: VACANCY_DB (full file path), VACANCY_PORT (u16 loopback port), VACANCY_ASSETS (frontend dist directory).
+Default URL: http://127.0.0.1:48173. Build frontend first in ../frontend with npm ci and npm run build. Backend serves ../frontend/dist with SPA fallback. Database defaults to LOCALAPPDATA/VacancySearch/vacancy.sqlite3 (outside checkout). Optional process environment: VACANCY_DB (full file path), VACANCY_PORT (low-level override for isolated test servers only; user launch is fixed at 48173), VACANCY_ASSETS (frontend dist directory).
 
 Startup creates the database, applies embedded checksum-checked migrations and backfills Unicode search projections before HTTP readiness. DELETE journal, FULL synchronous, FK enforcement, 5-second busy timeout and one SQLx pooled connection. Ctrl+C shuts down gracefully. /api/health returns the actual SQLite runtime version.
 
@@ -36,3 +36,7 @@ The HH adapter is implemented in src/hh.rs and src/hh/. It permits only manually
 HH remains disabled unless HH_API_ACCESS_CONFIRMED=1 and a real registered-app HH_USER_AGENT are configured locally. HH_API_TOKEN is optional, if required for authorized access; no token value is exposed. Registration/applicant eligibility is unresolved, with the user reporting a company-only form. See ../../docs/architecture/hh.md and ../../docs/roadmap/hh-verification.md. No scheduler, outreach, remote access or communication account integration exists.
 
 Shared API/architecture and current limitations are maintained in the umbrella docs. Application commits are local and unpublished; no upstream remote is configured.
+
+## Refusal compatibility
+
+Migration 8 preserves legacy rejected without inferring a party and adds declined_by_applicant / rejected_by_employer to API and SQLite validation. PATCH status changes append transactional history; GET /api/v1/vacancies/{id}/status-history reads it. Notes-only and same-status saves append no event. See ../../docs/architecture/localization-and-statuses.md.

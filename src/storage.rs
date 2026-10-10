@@ -221,6 +221,15 @@ pub async fn read(c: &mut SqliteConnection, parts: &[&str], query: &str) -> Resu
                 "observed_at",
             )
         }
+        ["vacancies", id, "status-history"] => {
+            get(c, "vacancy", id).await?;
+            (
+                "vacancy_status_history",
+                Some(("vacancy_id", *id)),
+                false,
+                "_sequence",
+            )
+        }
         ["conversations", id, "messages"] => {
             get(c, "conversation", id).await?;
             (
@@ -290,6 +299,15 @@ pub async fn read(c: &mut SqliteConnection, parts: &[&str], query: &str) -> Resu
     {
         return Err(query_error("invalid_cursor"));
     }
+    if sort == "_sequence"
+        && token.as_ref().is_some_and(|x| {
+            !x.sort
+                .parse::<i64>()
+                .is_ok_and(|seq| seq > 0 && seq <= x.high)
+        })
+    {
+        return Err(query_error("invalid_cursor"));
+    }
     let high = if let Some(x) = &token {
         x.high
     } else {
@@ -299,7 +317,7 @@ pub async fn read(c: &mut SqliteConnection, parts: &[&str], query: &str) -> Resu
         .fetch_one(&mut *c)
         .await?
     };
-    let mut sql = format!("SELECT data,id FROM {t} r WHERE ingest_seq<=?");
+    let mut sql = format!("SELECT data,id,ingest_seq FROM {t} r WHERE ingest_seq<=?");
     let mut binds = Vec::new();
     if let Some((column, id)) = parent {
         sql.push_str(&format!(" AND {column}=?"));
@@ -339,15 +357,25 @@ pub async fn read(c: &mut SqliteConnection, parts: &[&str], query: &str) -> Resu
     }
     let direction = if asc { "ASC" } else { "DESC" };
     let comparison = if asc { ">" } else { "<" };
+    let sort_expression = if sort == "_sequence" {
+        "r.ingest_seq".to_owned()
+    } else {
+        format!("json_extract(data,'$.{sort}')")
+    };
     if let Some(x) = &token {
+        let position = if sort == "_sequence" {
+            "CAST(? AS INTEGER)"
+        } else {
+            "?"
+        };
         sql.push_str(&format!(
-            " AND (json_extract(data,'$.{sort}'),id){comparison}(?,?)"
+            " AND ({sort_expression},id){comparison}({position},?)"
         ));
         binds.push(x.sort.clone());
         binds.push(x.id.clone());
     }
     sql.push_str(&format!(
-        " ORDER BY json_extract(data,'$.{sort}') {direction},id {direction} LIMIT ?"
+        " ORDER BY {sort_expression} {direction},id {direction} LIMIT ?"
     ));
     let mut q = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(high);
     for b in binds {
@@ -356,7 +384,9 @@ pub async fn read(c: &mut SqliteConnection, parts: &[&str], query: &str) -> Resu
     let rows = q.bind((limit + 1) as i64).fetch_all(&mut *c).await?;
     let more = rows.len() > limit;
     let mut items = Vec::new();
+    let mut last_sequence = 0_i64;
     for row in rows.into_iter().take(limit) {
+        last_sequence = row.get("ingest_seq");
         let data: Value =
             serde_json::from_str(row.get::<&str, _>("data")).map_err(|_| ApiError::internal())?;
         items.push(hydrate(c, t, data, false).await?);
@@ -369,7 +399,11 @@ pub async fn read(c: &mut SqliteConnection, parts: &[&str], query: &str) -> Resu
                     scope,
                     filters: args,
                     high,
-                    sort: last[sort].as_str().ok_or_else(ApiError::internal)?.into(),
+                    sort: if sort == "_sequence" {
+                        last_sequence.to_string()
+                    } else {
+                        last[sort].as_str().ok_or_else(ApiError::internal)?.into()
+                    },
                     id: last["id"].as_str().ok_or_else(ApiError::internal)?.into(),
                 })
                 .map_err(|_| ApiError::internal())?,

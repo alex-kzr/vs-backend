@@ -416,6 +416,7 @@ pub async fn patch(c: &mut SqliteConnection, parts: &[&str], input: Value) -> Re
         return Err(ApiError::field("body", "Supply at least one field."));
     }
     let mut data = s::get(c, t, parts[1]).await?;
+    let previous_status = (t == "vacancy").then(|| data["status"].clone());
     for (k, value) in input.as_object().ok_or_else(ApiError::internal)? {
         data[k] = value.clone();
     }
@@ -447,6 +448,21 @@ pub async fn patch(c: &mut SqliteConnection, parts: &[&str], input: Value) -> Re
         "contact" => save_contact(c, &data, false).await?,
         "search_configuration" => s::update(c, t, &data, &[("name", data["name"].clone())]).await?,
         _ => s::update(c, t, &data, &[]).await?,
+    }
+    if let Some(previous) = previous_status
+        && previous != data["status"]
+    {
+        let history = s::record(json!({
+            "vacancy_id":data["id"], "previous_status":previous,
+            "status":data["status"], "changed_at":data["updated_at"]
+        }));
+        s::insert(
+            c,
+            "vacancy_status_history",
+            &history,
+            &[("vacancy_id", data["id"].clone())],
+        )
+        .await?;
     }
     s::hydrate(c, t, data, true).await
 }
