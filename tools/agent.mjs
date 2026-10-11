@@ -13,7 +13,7 @@ export function localBase(raw='http://127.0.0.1:48173') {
  return u.origin;
 }
 const uuid='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
-const postPath=new RegExp('^(?:cvs(?:/import-preview|/'+uuid+'/revisions)?|match-runs(?:/preview|/'+uuid+'/cancel|/'+uuid+'/jobs/'+uuid+'/(?:claim|complete|fail|retry))?)$');
+const postPath=new RegExp('^(?:cvs(?:/import-preview|/'+uuid+'/(?:revisions|delete|restore))?|match-runs(?:/preview|/'+uuid+'/cancel|/'+uuid+'/jobs/'+uuid+'/(?:claim|complete|fail|retry))?)$');
 export function workflowPath(path) {if(!postPath.test(path))throw new Error('Only documented CV / matching POST paths are allowed.');return path;}
 async function request(base,path,method,body,key) {
  const r=await fetch(base+'/api/v1/'+path,{method,redirect:'error',signal:AbortSignal.timeout(30000),headers:method==='POST'?{'Content-Type':'application/json','Idempotency-Key':key}:{},...(method==='POST'?{body:JSON.stringify(body)}:{})});

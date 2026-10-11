@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 pub fn table(resource: &str) -> Result<&'static str> {
     match resource {
         "cvs" => Ok("cv"),
+        "cv-sources" => Ok("cv_source"),
         "match-runs" => Ok("match_run"),
         "companies" => Ok("company"),
         "search-configurations" => Ok("search_configuration"),
@@ -152,8 +153,11 @@ pub async fn hydrate(
         "match_run" => {
             data = crate::matching::hydrate_run(c, data).await?;
         }
-        "cv" if detail => {
-            data = crate::cvs::detail(c, data).await?;
+        "cv" => {
+            data = crate::cvs::metadata(c, data).await?;
+            if detail {
+                data = crate::cvs::detail(c, data).await?;
+            }
         }
         "vacancy" => {
             let company = get(
@@ -266,13 +270,22 @@ pub async fn read(c: &mut SqliteConnection, parts: &[&str], query: &str) -> Resu
     let mut selections: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (k, value) in url::form_urlencoded::parse(query.as_bytes()) {
         let multiple = (k == "status" && t == "vacancy")
-            || (k == "company_id" && matches!(t, "vacancy" | "contact" | "conversation"));
+            || (k == "company_id" && matches!(t, "vacancy" | "contact" | "conversation"))
+            || (k == "source_code" && t == "cv");
         if multiple {
             if (k == "status" && !v::STATUSES.contains(&value.as_ref()))
                 || (k == "company_id" && uuid::Uuid::parse_str(&value).is_err())
             {
                 return Err(query_error("invalid_query"));
             }
+            if k == "source_code" && crate::cvs::source_code(&json!(value.as_ref())).is_err() {
+                return Err(query_error("invalid_query"));
+            }
+            let value = if k == "source_code" {
+                std::borrow::Cow::Owned(crate::cvs::source_code(&json!(value.as_ref()))?)
+            } else {
+                value
+            };
             let values = selections.entry(k.into_owned()).or_default();
             if values.len() >= 100 {
                 return Err(query_error("invalid_query"));
@@ -297,10 +310,14 @@ pub async fn read(c: &mut SqliteConnection, parts: &[&str], query: &str) -> Resu
     if !(1..=100).contains(&limit) {
         return Err(query_error("invalid_query"));
     }
+    if t == "cv" && args.get("deleted").is_some_and(|v| v == "false") {
+        args.remove("deleted");
+    }
     let cursor = args.remove("cursor");
     let scope = parts.join("/");
     let allowed: &[&str] = match t {
         "company" => &["q"],
+        "cv" => &["deleted", "source_code"],
         "contact" => &["q", "company_id"],
         "search_configuration" => &["enabled"],
         "vacancy" => &[
@@ -319,7 +336,8 @@ pub async fn read(c: &mut SqliteConnection, parts: &[&str], query: &str) -> Resu
     for (k, value) in &args {
         if (k.ends_with("_id") && k != "company_id" && uuid::Uuid::parse_str(value).is_err())
             || (k == "q" && (value.trim().is_empty() || value.chars().count() > 200))
-            || (k == "enabled" && !["true", "false"].contains(&value.as_str()))
+            || (matches!(k.as_str(), "enabled" | "deleted")
+                && !["true", "false"].contains(&value.as_str()))
         {
             return Err(query_error("invalid_query"));
         }
@@ -359,12 +377,26 @@ pub async fn read(c: &mut SqliteConnection, parts: &[&str], query: &str) -> Resu
     };
     let mut sql = format!("SELECT data,id,ingest_seq FROM {t} r WHERE ingest_seq<=?");
     let mut binds = Vec::new();
+    if t == "cv" && !args.contains_key("deleted") {
+        sql.push_str(" AND r.deleted_at IS NULL");
+    }
     if let Some((column, id)) = parent {
         sql.push_str(&format!(" AND {column}=?"));
         binds.push(id.to_owned());
     }
     for (k, value) in &args {
         match k.as_str() {
+            "deleted" => {
+                sql.push_str(" AND r.deleted_at IS NOT NULL");
+            }
+            "source_code" => {
+                let values: Vec<_> = value.split(',').collect();
+                sql.push_str(&format!(
+                    " AND r.source_code IN ({})",
+                    vec!["?"; values.len()].join(",")
+                ));
+                binds.extend(values.into_iter().map(str::to_owned));
+            }
             "q" => {
                 sql.push_str(" AND instr(r.normalized_text,?)>0");
                 binds.push(value.to_lowercase());

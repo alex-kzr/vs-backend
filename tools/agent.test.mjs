@@ -11,6 +11,7 @@ test('only loopback origins and documented workflows are accepted',()=>{
  for(const origin of ['https://example.com','http://user:pass@localhost','http://127.0.0.1/api','http://127.0.0.1/?token=x'])assert.throws(()=>localBase(origin));
  for(const path of ['../vacancies','vacancies','cvs?x=y','cvs/../../companies'])assert.throws(()=>workflowPath(path));
  assert.equal(workflowPath('cvs/import-preview'),'cvs/import-preview');
+ for(const action of ['delete','restore']) assert.equal(workflowPath('cvs/10000000-0000-4000-8000-000000000001/'+action),'cvs/10000000-0000-4000-8000-000000000001/'+action);
 });
 test('lost response reuses persisted request UUID and changed input is blocked',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'vacancy-agent-'));const keys=[];let requests=0;

@@ -31,6 +31,7 @@ pub async fn post(
     let normalized = match parts {
         ["cvs"] => cvs::normalize(&input, true, false)?,
         ["cvs", _, "revisions"] => cvs::normalize(&input, true, true)?,
+        ["cvs", _, "delete" | "restore"] => cvs::normalize_lifecycle(&input)?,
         _ => matching::normalize(parts, &input)?,
     };
     let operation = format!("workflow:{}", parts.join("/"));
@@ -40,7 +41,19 @@ pub async fn post(
         let previous: Value =
             serde_json::from_str(row.get("request_json")).map_err(|_| ApiError::internal())?;
         if previous != normalized {
-            return Err(ApiError::conflict("idempotency_conflict"));
+            // Existing receipts remain byte-for-byte intact across the additive source migration.
+            let compatible = if matches!(parts, ["cvs"] | ["cvs", _, "revisions"])
+                && previous.get("source_code").is_none()
+            {
+                let mut legacy = previous.clone();
+                legacy["confirmed"] = json!(true);
+                cvs::normalize(&legacy, true, parts.len() == 3).ok()
+            } else {
+                None
+            };
+            if compatible.as_ref() != Some(&normalized) {
+                return Err(ApiError::conflict("idempotency_conflict"));
+            }
         }
         let result: Value =
             serde_json::from_str(row.get("result_json")).map_err(|_| ApiError::internal())?;
@@ -49,11 +62,14 @@ pub async fn post(
     let result = match parts {
         ["cvs"] => cvs::save(c, None, &normalized).await?,
         ["cvs", id, "revisions"] => cvs::save(c, Some(id), &normalized).await?,
+        ["cvs", id, action @ ("delete" | "restore")] => {
+            cvs::change_lifecycle(c, id, *action == "delete", &normalized).await?
+        }
         _ => matching::write(c, parts, &normalized).await?,
     };
     sqlx::query("INSERT INTO request_receipt(operation,target,key,request_json,result_json) VALUES(?,'',?,?,?)")
   .bind(operation).bind(key).bind(normalized.to_string()).bind(result.to_string()).execute(c).await?;
-    let status = if parts.len() == 1 || parts.first() == Some(&"cvs") {
+    let status = if parts.len() == 1 || matches!(parts, ["cvs", _, "revisions"]) {
         StatusCode::CREATED
     } else {
         StatusCode::OK

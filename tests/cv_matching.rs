@@ -695,7 +695,7 @@ async fn upgrade_from_version_eight_preserves_every_legacy_row_and_migration_che
             .fetch_one(&upgraded)
             .await
             .unwrap(),
-        10
+        12
     );
     assert!(after["cv"].is_empty());
     assert!(after["match_run"].is_empty());
@@ -775,4 +775,449 @@ async fn result_provenance_must_match_the_claimed_agent() {
     )
     .await;
     t.finish(&run, &jobs[0]).await;
+}
+
+fn lifecycle(meta: &Value) -> Value {
+    json!({"confirmed":true,"expected_revision_id":meta["current_revision_id"],"expected_lifecycle_version":meta["lifecycle_version"]})
+}
+#[tokio::test]
+async fn cv_soft_delete_restore_preserves_revisions_and_supports_deleted_lists() {
+    let t = App::new().await;
+    let c = t.post("cvs", cv()).await;
+    assert_eq!(c["lifecycle_version"], 0);
+    let revision = t.get(&format!("cvs/{}", id(&c))).await["data"]["revision"].clone();
+    let removed = t
+        .action(&format!("cvs/{}/delete", id(&c)), lifecycle(&c))
+        .await;
+    assert!(removed["deleted_at"].is_string());
+    assert_eq!(removed["lifecycle_version"], 1);
+    assert_eq!(t.get("cvs").await["items"], json!([]));
+    assert_eq!(t.get("cvs?deleted=true").await["items"][0]["id"], c["id"]);
+    assert_eq!(
+        t.get(&format!("cvs/{}/revisions/{}", id(&c), id(&revision)))
+            .await["data"],
+        revision
+    );
+    let restored = t
+        .action(&format!("cvs/{}/restore", id(&c)), lifecycle(&removed))
+        .await;
+    assert!(restored["deleted_at"].is_null());
+    assert_eq!(restored["lifecycle_version"], 2);
+    assert_eq!(t.get("cvs").await["items"][0]["id"], c["id"]);
+    assert_eq!(
+        t.get(&format!("cvs/{}/revisions", id(&c))).await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(t.get("match-runs").await["items"], json!([]));
+    for query in ["deleted=all", "deleted=true&deleted=false"] {
+        assert_eq!(
+            t.call("GET", &format!("cvs?{query}"), Value::Null, None)
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let deleted = t
+        .action(&format!("cvs/{}/delete", id(&c)), lifecycle(&restored))
+        .await;
+    t.pool.close().await;
+    let reopened = open_database(&t.dir.path().join("fixture.sqlite3"))
+        .await
+        .unwrap();
+    let value: Option<String> = sqlx::query_scalar("SELECT deleted_at FROM cv WHERE id=?")
+        .bind(id(&c))
+        .fetch_one(&reopened)
+        .await
+        .unwrap();
+    assert_eq!(value.as_deref(), deleted["deleted_at"].as_str());
+}
+#[tokio::test]
+async fn cv_delete_blocks_new_work_but_pinned_running_and_completed_work_survives() {
+    let t = App::new().await;
+    let (c, run, jobs) = t.setup().await;
+    let packet = t.get(&format!("match-runs/{}/inputs", id(&run))).await;
+    t.claim(&run, &jobs[0]).await;
+    let deleted = t
+        .action(&format!("cvs/{}/delete", id(&c)), lifecycle(&c))
+        .await;
+    t.rejects(
+        "match-runs/preview",
+        selection(&c),
+        StatusCode::CONFLICT,
+        "cv_deleted",
+    )
+    .await;
+    let mut input = selection(&c);
+    input["confirmed"] = json!(true);
+    t.rejects("match-runs", input, StatusCode::CONFLICT, "cv_deleted")
+        .await;
+    t.rejects(
+        &format!("cvs/{}/revisions", id(&c)),
+        version(&c),
+        StatusCode::CONFLICT,
+        "cv_deleted",
+    )
+    .await;
+    t.rejects(
+        "cvs",
+        cv(),
+        StatusCode::CONFLICT,
+        "cv_deleted_duplicate_source",
+    )
+    .await;
+    t.finish(&run, &jobs[0]).await;
+    t.claim(&run, &jobs[1]).await;
+    t.finish(&run, &jobs[1]).await;
+    let after = t.get(&format!("match-runs/{}/inputs", id(&run))).await;
+    assert_eq!(after["data"]["cv_revision"], packet["data"]["cv_revision"]);
+    assert_eq!(after["data"]["run"]["cv_deleted"], true);
+    assert_eq!(after["data"]["run"]["cv_stale"], false);
+    assert_eq!(after["data"]["run"]["state"], "completed");
+    t.action(&format!("cvs/{}/restore", id(&c)), lifecycle(&deleted))
+        .await;
+    assert_eq!(
+        t.get(&format!("match-runs/{}", id(&run))).await["data"]["cv_deleted"],
+        false
+    );
+}
+#[tokio::test]
+async fn lifecycle_replays_and_stale_requests_cannot_delete_after_restore_or_edit() {
+    let t = App::new().await;
+    let c = t.post("cvs", cv()).await;
+    let path = format!("cvs/{}/delete", id(&c));
+    let key = uuid::Uuid::new_v4().to_string();
+    let input = lifecycle(&c);
+    let (a, b) = tokio::join!(
+        t.call("POST", &path, input.clone(), Some(&key)),
+        t.call("POST", &path, input.clone(), Some(&key))
+    );
+    assert_eq!(a.0, StatusCode::OK);
+    assert_eq!(b.0, StatusCode::OK);
+    assert_eq!(a.1["data"], b.1["data"]);
+    let removed = a.1["data"].clone();
+    let restored = t
+        .action(&format!("cvs/{}/restore", id(&c)), lifecycle(&removed))
+        .await;
+    assert_eq!(
+        t.call("POST", &path, input.clone(), Some(&key)).await.1["deduplicated"],
+        true
+    );
+    assert!(t.get(&format!("cvs/{}", id(&c))).await["data"]["deleted_at"].is_null());
+    t.rejects(&path, input, StatusCode::CONFLICT, "cv_lifecycle_conflict")
+        .await;
+    let mut missing = lifecycle(&restored);
+    missing["confirmed"] = json!(false);
+    t.rejects(
+        &path,
+        missing,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "validation_failed",
+    )
+    .await;
+    let changed = t
+        .post(&format!("cvs/{}/revisions", id(&c)), version(&c))
+        .await;
+    t.rejects(
+        &path,
+        lifecycle(&restored),
+        StatusCode::CONFLICT,
+        "cv_revision_conflict",
+    )
+    .await;
+    let removed = t.action(&path, lifecycle(&changed)).await;
+    let repeated = t.action(&path, lifecycle(&removed)).await;
+    assert_eq!(repeated["lifecycle_version"], removed["lifecycle_version"]);
+}
+#[tokio::test]
+async fn sources_are_explicit_extensible_and_identity_is_scoped_to_source() {
+    let t = App::new().await;
+    let hh = t.post("cvs", cv()).await;
+    assert_eq!(hh["source_code"], "hh.ru");
+    assert_eq!(hh["source_url"], cv()["hh_url"]);
+    assert_eq!(hh["external_id"], "synthetic_cv_123");
+    let mut manual = cv();
+    manual["hh_url"] = Value::Null;
+    assert_eq!(t.post("cvs", manual).await["source_code"], "manual");
+    let mut other = cv();
+    other["hh_url"] = Value::Null;
+    other["source_code"] = json!("skillstaff.ru");
+    other["source_url"] = json!("https://skillstaff.ru/cv/123?variant=one#section");
+    other["external_id"] = json!("synthetic_cv_123");
+    let skill = t.post("cvs", other.clone()).await;
+    assert_eq!(
+        skill["source_url"],
+        "https://skillstaff.ru/cv/123?variant=one"
+    );
+    other["name"] = json!("Duplicate external identity");
+    other["source_url"] = json!("https://skillstaff.ru/changed");
+    t.rejects(
+        "cvs",
+        other.clone(),
+        StatusCode::CONFLICT,
+        "cv_duplicate_source",
+    )
+    .await;
+    let deleted = t
+        .action(&format!("cvs/{}/delete", id(&skill)), lifecycle(&skill))
+        .await;
+    t.rejects(
+        "cvs",
+        other,
+        StatusCode::CONFLICT,
+        "cv_deleted_duplicate_source",
+    )
+    .await;
+    let mut custom = cv();
+    custom["hh_url"] = Value::Null;
+    custom["source_code"] = json!("example.org");
+    custom["source_url"] = json!("https://example.org/cv/42");
+    assert_eq!(t.post("cvs", custom).await["source_code"], "example.org");
+    assert!(
+        t.get("cv-sources").await["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["code"] == "example.org")
+    );
+    let mut inconsistent = cv();
+    inconsistent["source_code"] = json!("skillstaff.ru");
+    t.rejects(
+        "cvs",
+        inconsistent,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "validation_failed",
+    )
+    .await;
+    t.action(&format!("cvs/{}/restore", id(&skill)), lifecycle(&deleted))
+        .await;
+}
+#[tokio::test]
+async fn cv_source_filters_are_or_combined_with_deleted_scope_and_bound_to_cursor() {
+    let t = App::new().await;
+    let hh = t.post("cvs", cv()).await;
+    for i in 0..2 {
+        let mut input = cv();
+        input["hh_url"] = Value::Null;
+        input["source_code"] = json!("skillstaff.ru");
+        input["external_id"] = json!(format!("fixture-{i}"));
+        t.post("cvs", input).await;
+    }
+    let mut input = cv();
+    input["hh_url"] = Value::Null;
+    t.post("cvs", input).await;
+    let page = t
+        .get("cvs?source_code=skillstaff.ru&source_code=hh.ru&limit=1")
+        .await;
+    let cursor = page["next_cursor"].as_str().unwrap();
+    assert_eq!(
+        t.get(&format!(
+            "cvs?source_code=hh.ru&source_code=skillstaff.ru&limit=100&cursor={cursor}"
+        ))
+        .await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        t.call(
+            "GET",
+            &format!("cvs?source_code=hh.ru&cursor={cursor}"),
+            Value::Null,
+            None
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    t.action(&format!("cvs/{}/delete", id(&hh)), lifecycle(&hh))
+        .await;
+    assert_eq!(t.get("cvs?source_code=hh.ru").await["items"], json!([]));
+    assert_eq!(
+        t.get("cvs?source_code=hh.ru&deleted=true").await["items"][0]["id"],
+        hh["id"]
+    );
+    for q in ["source_code=https%3A%2F%2Fevil.test", "source_code="] {
+        assert_eq!(
+            t.call("GET", &format!("cvs?{q}"), Value::Null, None)
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+}
+
+#[tokio::test]
+async fn version_ten_upgrade_preserves_cv_json_revisions_receipts_and_pinned_history() {
+    use sqlx::sqlite::SqliteConnectOptions;
+    let dir = tempfile::tempdir().unwrap();
+    let migrations = dir.path().join("v10-migrations");
+    std::fs::create_dir(&migrations).unwrap();
+    for entry in
+        std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))
+            .unwrap()
+    {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .unwrap()
+            .split('_')
+            .next()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap()
+            <= 10
+        {
+            std::fs::copy(entry.path(), migrations.join(name)).unwrap();
+        }
+    }
+    let db = dir.path().join("legacy.sqlite3");
+    let pool = SqlitePool::connect_with(
+        SqliteConnectOptions::new()
+            .filename(&db)
+            .create_if_missing(true)
+            .foreign_keys(true),
+    )
+    .await
+    .unwrap();
+    sqlx::migrate::Migrator::new(migrations.as_path())
+        .await
+        .unwrap()
+        .run(&pool)
+        .await
+        .unwrap();
+    let cv_id = uuid::Uuid::new_v4().to_string();
+    let revision_id = uuid::Uuid::new_v4().to_string();
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let url = "https://hh.ru/resume/synthetic_legacy";
+    let data = json!({"id":cv_id,"name":"Synthetic legacy CV","hh_url":url,"current_revision_id":revision_id,"current_revision_number":1,"imported_at":"2026-10-11T00:00:00Z"}).to_string();
+    let revision = json!({"id":revision_id,"cv_id":cv_id,"revision_number":1,"name":"Synthetic legacy CV","hh_url":url,"content":"Synthetic Rust CV","structured":{"skills":["Rust"]},"source":{"kind":"hh_browser","url":url,"observed_at":"2026-10-11T00:00:00Z","agent":"synthetic-migration"},"imported_at":"2026-10-11T00:00:00Z"}).to_string();
+    sqlx::query("INSERT INTO cv(id,hh_url,data) VALUES(?,?,?)")
+        .bind(&cv_id)
+        .bind(url)
+        .bind(&data)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO cv_revision(id,cv_id,revision_number,data) VALUES(?,?,1,?)")
+        .bind(&revision_id)
+        .bind(&cv_id)
+        .bind(&revision)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO match_run(id,cv_id,cv_revision_id,data) VALUES(?,?,?,?)").bind(&run_id).bind(&cv_id).bind(&revision_id).bind(json!({"id":run_id,"cv_id":cv_id,"cv_revision_id":revision_id,"state":"completed","snapshot":"synthetic immutable history"}).to_string()).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO request_receipt(operation,target,key,request_json,result_json) VALUES('workflow:cvs','',?,'{}',?)").bind(uuid::Uuid::new_v4().to_string()).bind(&data).execute(&pool).await.unwrap();
+    let before = legacy_rows(&pool).await;
+    let checksums: Vec<(i64, Vec<u8>)> =
+        sqlx::query_as("SELECT version,checksum FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    pool.close().await;
+    let upgraded = open_database(&db).await.unwrap();
+    let after = legacy_rows(&upgraded).await;
+    for (name, rows) in before {
+        if name != "cv" {
+            assert_eq!(after.get(&name), Some(&rows), "legacy table {name} changed");
+        }
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT data FROM cv WHERE id=?")
+            .bind(&cv_id)
+            .fetch_one(&upgraded)
+            .await
+            .unwrap(),
+        data
+    );
+    let metadata: (String, String, String, Option<String>, i64) = sqlx::query_as(
+        "SELECT source_code,source_url,external_id,deleted_at,lifecycle_version FROM cv WHERE id=?",
+    )
+    .bind(&cv_id)
+    .fetch_one(&upgraded)
+    .await
+    .unwrap();
+    assert_eq!(
+        metadata,
+        (
+            "hh.ru".into(),
+            url.into(),
+            "synthetic_legacy".into(),
+            None,
+            0
+        )
+    );
+    let old_checksums: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+        "SELECT version,checksum FROM _sqlx_migrations WHERE version<=10 ORDER BY version",
+    )
+    .fetch_all(&upgraded)
+    .await
+    .unwrap();
+    assert_eq!(old_checksums, checksums);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
+            .fetch_one(&upgraded)
+            .await
+            .unwrap(),
+        "ok"
+    );
+    assert!(
+        sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&upgraded)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    upgraded.close().await;
+    let reopened = open_database(&db).await.unwrap();
+    assert_eq!(legacy_rows(&reopened).await, after);
+}
+#[tokio::test]
+async fn legacy_cv_receipt_replays_without_rewriting_it_or_reviving_a_deleted_cv() {
+    let t = App::new().await;
+    let key = uuid::Uuid::new_v4().to_string();
+    let (status, result) = t.call("POST", "cvs", cv(), Some(&key)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created = &result["data"];
+    let raw: String = sqlx::query_scalar("SELECT request_json FROM request_receipt WHERE key=?")
+        .bind(&key)
+        .fetch_one(&t.pool)
+        .await
+        .unwrap();
+    let mut legacy: Value = serde_json::from_str(&raw).unwrap();
+    for field in ["source_code", "source_url", "external_id"] {
+        legacy.as_object_mut().unwrap().remove(field);
+    }
+    let legacy = legacy.to_string();
+    sqlx::query("UPDATE request_receipt SET request_json=? WHERE key=?")
+        .bind(&legacy)
+        .bind(&key)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+    t.action(&format!("cvs/{}/delete", id(created)), lifecycle(created))
+        .await;
+    let (status, replay) = t.call("POST", "cvs", cv(), Some(&key)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replay["deduplicated"], true);
+    assert_eq!(replay["data"], *created);
+    assert!(t.get(&format!("cvs/{}", id(created))).await["data"]["deleted_at"].is_string());
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT request_json FROM request_receipt WHERE key=?")
+            .bind(&key)
+            .fetch_one(&t.pool)
+            .await
+            .unwrap(),
+        legacy
+    );
+    let mut changed = cv();
+    changed["content"] = json!("Changed synthetic CV");
+    assert_eq!(
+        t.call("POST", "cvs", changed, Some(&key)).await.0,
+        StatusCode::CONFLICT
+    );
 }
