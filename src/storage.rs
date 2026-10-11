@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 
 pub fn table(resource: &str) -> Result<&'static str> {
     match resource {
+        "cvs" => Ok("cv"),
+        "match-runs" => Ok("match_run"),
         "companies" => Ok("company"),
         "search-configurations" => Ok("search_configuration"),
         "vacancies" => Ok("vacancy"),
@@ -141,6 +143,18 @@ pub async fn hydrate(
         .ok_or_else(ApiError::internal)?
         .to_owned();
     match t {
+        "cv_revision" if !detail => {
+            if let Some(o) = data.as_object_mut() {
+                o.remove("content");
+                o.remove("structured");
+            }
+        }
+        "match_run" => {
+            data = crate::matching::hydrate_run(c, data).await?;
+        }
+        "cv" if detail => {
+            data = crate::cvs::detail(c, data).await?;
+        }
         "vacancy" => {
             let company = get(
                 c,
@@ -220,6 +234,10 @@ pub async fn read(c: &mut SqliteConnection, parts: &[&str], query: &str) -> Resu
                 false,
                 "observed_at",
             )
+        }
+        ["cvs", id, "revisions"] => {
+            get(c, "cv", id).await?;
+            ("cv_revision", Some(("cv_id", *id)), false, "_sequence")
         }
         ["vacancies", id, "status-history"] => {
             get(c, "vacancy", id).await?;

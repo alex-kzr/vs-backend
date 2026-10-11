@@ -35,7 +35,7 @@ The HH adapter is implemented in src/hh.rs and src/hh/. It permits only manually
 
 HH remains disabled unless HH_API_ACCESS_CONFIRMED=1 and a real registered-app HH_USER_AGENT are configured locally. HH_API_TOKEN is optional, if required for authorized access; no token value is exposed. Registration/applicant eligibility is unresolved, with the user reporting a company-only form. See ../../docs/architecture/hh.md and ../../docs/roadmap/hh-verification.md. No scheduler, outreach, remote access or communication account integration exists.
 
-Shared API/architecture and current limitations are maintained in the umbrella docs. Application commits are local and unpublished; no upstream remote is configured.
+Shared API/architecture and current limitations are maintained in the umbrella docs. The authorized GitHub origin is https://github.com/alex-kzr/vs-backend. Publish checked commits normally before the umbrella gitlink; no force push.
 
 ## Refusal compatibility
 
@@ -44,3 +44,7 @@ Migration 8 preserves legacy rejected without inferring a party and adds decline
 ## Multi-value filters
 
 Lists support repeated status/company_id query keys for vacancies, and repeated company_id for contacts/conversations. OR within a selection, AND between filters. Empty selection omits the filter. Validation, canonical cursor binding, scalar URL compatibility and limits are documented in ../../docs/roadmap/multi-filters.md. No database migration is needed.
+
+## CV and external-agent workflow
+
+Migrations 9/10 add immutable CV revisions and explicitly requested matching batches/jobs/attempts. src/cvs.rs owns CV validation/versions, src/matching.rs pins inputs and validates external result evidence/state, src/workflow.rs persists replay receipts. There is no embedded semantic matcher, Codex process, scheduler or provider call. tools/agent.mjs is a loopback-only Node 24 transport with request envelopes persisted before POST. Run node --test tools/agent.test.mjs. The app accepts text and optional structured information; browser HH provenance is reported by an explicitly authorized external agent, with no login/cookie handling here. Full payloads, limits, retry behavior and examples: ../../docs/agent-matching.md. Tests use only synthetic CVs/results, and version-8 migration fixtures.

@@ -1,10 +1,13 @@
 mod adapters;
 mod browser_review;
+mod cvs;
 pub mod error;
 pub mod hh;
 mod ingestion;
+mod matching;
 mod storage;
 mod validation;
+mod workflow;
 mod writes;
 
 use axum::{
@@ -168,7 +171,11 @@ async fn api(
     }
     if method == Method::GET {
         let mut connection = s.pool.begin().await?;
-        let value = storage::read(&mut connection, &parts, &query).await?;
+        let value = if workflow::handles(&parts) {
+            workflow::read(&mut connection, &parts, &query).await?
+        } else {
+            storage::read(&mut connection, &parts, &query).await?
+        };
         connection.commit().await?;
         return Ok(axum::Json(value).into_response());
     }
@@ -177,6 +184,13 @@ async fn api(
             StatusCode::METHOD_NOT_ALLOWED,
             "method_not_allowed",
             "Unsupported method.",
+        ));
+    }
+    if method == Method::PATCH && workflow::handles(&parts) {
+        return Err(ApiError::new(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method_not_allowed",
+            "Используйте создание новой версии или явное действие пакета.",
         ));
     }
     if request
@@ -218,7 +232,11 @@ async fn api(
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid_json", "Invalid JSON."))?;
     let mut connection = s.pool.begin().await?;
     let (status, output) = if let Some(key) = key {
-        writes::create(&mut connection, &parts, &key, input).await?
+        if workflow::handles(&parts) {
+            workflow::post(&mut connection, &parts, &key, input).await?
+        } else {
+            writes::create(&mut connection, &parts, &key, input).await?
+        }
     } else {
         (
             StatusCode::OK,
