@@ -1221,3 +1221,106 @@ async fn legacy_cv_receipt_replays_without_rewriting_it_or_reviving_a_deleted_cv
         StatusCode::CONFLICT
     );
 }
+
+#[tokio::test]
+async fn cv_state_multiselect_is_or_scoped_compatible_and_cursor_bound_without_writes() {
+    let t = App::new().await;
+    for (source, external) in [
+        ("hh.ru", "hh_active"),
+        ("hh.ru", "hh_deleted"),
+        ("skillstaff.ru", "skill_active"),
+        ("skillstaff.ru", "skill_deleted"),
+    ] {
+        let mut input = cv();
+        input["hh_url"] = if source == "hh.ru" {
+            json!(format!("https://hh.ru/resume/{external}"))
+        } else {
+            Value::Null
+        };
+        input["source_code"] = json!(source);
+        input["external_id"] = json!(external);
+        let created = t.post("cvs", input).await;
+        if external.ends_with("deleted") {
+            t.action(&format!("cvs/{}/delete", id(&created)), lifecycle(&created))
+                .await;
+        }
+    }
+    let before = legacy_rows(&t.pool).await;
+    for (query, count) in [
+        ("", 2),
+        ("?cv_state=active", 2),
+        ("?cv_state=deleted", 2),
+        ("?cv_state=active&cv_state=deleted", 4),
+        ("?cv_state=all", 4),
+        ("?deleted=true", 2),
+        ("?deleted=false", 2),
+        ("?source_code=hh.ru&cv_state=all", 2),
+        ("?source_code=skillstaff.ru&cv_state=deleted", 1),
+    ] {
+        assert_eq!(
+            t.get(&format!("cvs{query}")).await["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            count,
+            "{query}"
+        );
+    }
+    let page = t
+        .get("cvs?source_code=hh.ru&cv_state=active&cv_state=deleted&limit=1")
+        .await;
+    let cursor = page["next_cursor"].as_str().unwrap();
+    assert_eq!(
+        t.get(&format!(
+            "cvs?cv_state=deleted&cv_state=active&source_code=hh.ru&cursor={cursor}"
+        ))
+        .await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        t.get(&format!(
+            "cvs?cv_state=all&source_code=hh.ru&cursor={cursor}"
+        ))
+        .await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    for query in [
+        "cv_state=",
+        "cv_state=unknown",
+        "cv_state=all&cv_state=active",
+        "deleted=true&cv_state=deleted",
+        "deleted=all",
+    ] {
+        assert_eq!(
+            t.call("GET", &format!("cvs?{query}"), Value::Null, None)
+                .await
+                .0,
+            StatusCode::BAD_REQUEST,
+            "{query}"
+        );
+    }
+    assert_eq!(
+        t.call(
+            "GET",
+            &format!("cvs?cv_state=active&source_code=hh.ru&cursor={cursor}"),
+            Value::Null,
+            None
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        t.call("GET", "companies?cv_state=active", Value::Null, None)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(legacy_rows(&t.pool).await, before);
+}
