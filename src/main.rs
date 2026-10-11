@@ -1,4 +1,7 @@
-use std::{net::SocketAddr, path::PathBuf};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    path::PathBuf,
+};
 use vacancy_search_backend::{AppState, open_database, router};
 
 #[tokio::main]
@@ -21,8 +24,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !assets.join("index.html").exists() {
         eprintln!("Frontend assets absent; API available. Set VACANCY_ASSETS or build frontend.");
     }
+    // Containers need to listen on their network interface; the default stays loopback-only.
+    let bind_ip = match std::env::var("VACANCY_BIND") {
+        Ok(value) => value.parse::<IpAddr>()?,
+        Err(std::env::VarError::NotPresent) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        Err(error) => return Err(error.into()),
+    };
     // Bind before migrating so a port conflict cannot mutate the database.
-    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let address = SocketAddr::from((bind_ip, port));
     let listener = tokio::net::TcpListener::bind(address).await?;
     let pool = open_database(&data).await?;
     let state = AppState {
@@ -36,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ],
     };
     println!(
-        "Vacancy Search: http://{address}; database: {}",
+        "Vacancy Search: http://127.0.0.1:{port}; listening on {address}; database: {}",
         data.display()
     );
     axum::serve(listener, router(state, Some(&assets)))
