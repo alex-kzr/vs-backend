@@ -92,6 +92,7 @@ pub fn normalize_selection(input: &Value, confirmed: bool) -> Result<Value> {
     )
 }
 async fn selected(c: &mut SqliteConnection, input: &Value) -> Result<(Value, Vec<Value>)> {
+    crate::cvs::require_active(c, input["cv_id"].as_str().ok_or_else(ApiError::internal)?).await?;
     let cv = s::get(
         c,
         "cv",
@@ -619,6 +620,8 @@ pub async fn hydrate_run(c: &mut SqliteConnection, mut run: Value) -> Result<Val
         run["cv_id"].as_str().ok_or_else(ApiError::internal)?,
     )
     .await?;
+    let cv = crate::cvs::metadata(c, cv).await?;
+    run["cv_deleted"] = json!(!cv["deleted_at"].is_null());
     let cv_stale = cv["current_revision_id"] != run["cv_revision_id"];
     let mut stale_jobs = 0;
     for job in jobs(c, run["id"].as_str().ok_or_else(ApiError::internal)?).await? {

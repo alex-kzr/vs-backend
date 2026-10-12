@@ -23,7 +23,7 @@ cargo test --locked
 cargo build --release --locked
 ```
 
-Tests use disposable file databases and synthetic data. They cover identity, retries, race, rollback, timeline high-water marks, upgrade/checksum/failure, integrity and stopped-copy restoration. HH tests use loopback HTTP mocks for headers/query/mapping, errors, limits, cooldown and cancellation. Current gate: 17 unit + 26 file-backed integration tests pass.
+Tests use disposable file databases and synthetic data. They cover identity, retries, race, rollback, timeline high-water marks, upgrade/checksum/failure, integrity and stopped-copy restoration. HH tests use loopback HTTP mocks for headers/query/mapping, errors, limits, cooldown and cancellation. Current gate: 21 unit + 47 file-backed integration tests (including 21 CV/matching tests) pass, plus 3 Node transport tests.
 
 ## Boundaries
 
@@ -48,3 +48,9 @@ Lists support repeated status/company_id query keys for vacancies, and repeated 
 ## CV and external-agent workflow
 
 Migrations 9/10 add immutable CV revisions and explicitly requested matching batches/jobs/attempts. src/cvs.rs owns CV validation/versions, src/matching.rs pins inputs and validates external result evidence/state, src/workflow.rs persists replay receipts. There is no embedded semantic matcher, Codex process, scheduler or provider call. tools/agent.mjs is a loopback-only Node 24 transport with request envelopes persisted before POST. Run node --test tools/agent.test.mjs. The app accepts text and optional structured information; browser HH provenance is reported by an explicitly authorized external agent, with no login/cookie handling here. Full payloads, limits, retry behavior and examples: ../../docs/agent-matching.md. Tests use only synthetic CVs/results, and version-8 migration fixtures.
+
+## CV lifecycle and origins
+
+Migrations 11/12 add reversible deletion and source-scoped identities without rewriting legacy CV/revision JSON or receipts. POST cvs/{id}/delete and /restore require confirmation and current revision/lifecycle generation; retries are idempotent. New revisions and matching require active CVs; old pinned packets remain usable. GET cvs?deleted=true lists removed records; repeated source_code values select origins. GET cv-sources is read-only; new explicit domains register only on confirmed import. hh.ru/skillstaff.ru are metadata origins, distinct from revision.source.kind. No new site adapter is connected. Full contract: ../../docs/architecture/cv-lifecycle-and-sources.md.
+
+CV state filters accept repeated cv_state=active / deleted with OR semantics, AND with source_code. Omitted state defaults to active; cv_state=all represents an empty UI selection. Legacy deleted=true/false links and their cursor scopes remain supported. Ambiguous legacy+new filters are rejected; all and both states share a cursor scope. No migration or data rewrite is required.
