@@ -4,6 +4,7 @@ mod cvs;
 pub mod error;
 pub mod hh;
 mod ingestion;
+pub mod maintenance;
 mod matching;
 mod storage;
 mod validation;
@@ -37,12 +38,29 @@ pub struct AppState {
 pub async fn open_database(
     path: &FilePath,
 ) -> std::result::Result<SqlitePool, Box<dyn std::error::Error>> {
-    if let Some(parent) = path.parent() {
+    open_database_with_creation(path, true).await
+}
+/// Open a managed file without creating a replacement at a wrong path.
+pub async fn open_existing_database(
+    path: &FilePath,
+) -> std::result::Result<SqlitePool, Box<dyn std::error::Error>> {
+    if !path.is_file() {
+        return Err(
+            std::io::Error::other("Existing database missing; no empty file created.").into(),
+        );
+    }
+    open_database_with_creation(path, false).await
+}
+async fn open_database_with_creation(
+    path: &FilePath,
+    create: bool,
+) -> std::result::Result<SqlitePool, Box<dyn std::error::Error>> {
+    if create && let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let options = SqliteConnectOptions::new()
         .filename(path)
-        .create_if_missing(true)
+        .create_if_missing(create)
         .foreign_keys(true)
         .busy_timeout(Duration::from_secs(5))
         .journal_mode(SqliteJournalMode::Delete)

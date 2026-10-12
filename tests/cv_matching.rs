@@ -695,7 +695,7 @@ async fn upgrade_from_version_eight_preserves_every_legacy_row_and_migration_che
             .fetch_one(&upgraded)
             .await
             .unwrap(),
-        12
+        13
     );
     assert!(after["cv"].is_empty());
     assert!(after["match_run"].is_empty());

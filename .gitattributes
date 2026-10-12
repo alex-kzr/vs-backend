@@ -1,0 +1,15 @@
+# Freeze historical migration bytes: SQLx checksums include line endings.
+migrations/*.sql text eol=lf
+migrations/0001_core.sql text eol=lf
+migrations/0002_communications.sql text eol=lf
+migrations/0003_fixture_source.sql text eol=lf
+migrations/0004_unicode_search.sql text eol=lf
+migrations/0005_contact_roles.sql text eol=lf
+migrations/0006_hh_source.sql text eol=lf
+migrations/0007_hh_browser_source.sql text eol=lf
+migrations/0008_refusal_statuses.sql text eol=crlf
+migrations/0009_cvs.sql text eol=crlf
+migrations/0010_explicit_matching.sql text eol=crlf
+migrations/0011_cv_soft_delete.sql text eol=crlf
+migrations/0012_cv_sources.sql text eol=crlf
+migrations/0013_runtime_identity.sql text eol=crlf
