@@ -1,6 +1,6 @@
 //! Transactional transport for explicitly initiated CV and external-agent workflows.
 use crate::{
-    cvs,
+    cv_reviews, cvs,
     error::{ApiError, Result},
     matching, storage as s,
 };
@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 use sqlx::{Row, SqliteConnection};
 pub fn handles(parts: &[&str]) -> bool {
-    matches!(parts.first(), Some(&"cvs" | &"match-runs"))
+    cv_reviews::handles(parts) || matches!(parts.first(), Some(&"cvs" | &"match-runs"))
 }
 pub async fn post(
     c: &mut SqliteConnection,
@@ -28,11 +28,15 @@ pub async fn post(
             json!({"data":matching::preview(c,&matching::normalize_selection(&input,false)?).await?}),
         ));
     }
-    let normalized = match parts {
-        ["cvs"] => cvs::normalize(&input, true, false)?,
-        ["cvs", _, "revisions"] => cvs::normalize(&input, true, true)?,
-        ["cvs", _, "delete" | "restore"] => cvs::normalize_lifecycle(&input)?,
-        _ => matching::normalize(parts, &input)?,
+    let normalized = if cv_reviews::handles(parts) {
+        cv_reviews::normalize(parts, &input)?
+    } else {
+        match parts {
+            ["cvs"] => cvs::normalize(&input, true, false)?,
+            ["cvs", _, "revisions"] => cvs::normalize(&input, true, true)?,
+            ["cvs", _, "delete" | "restore"] => cvs::normalize_lifecycle(&input)?,
+            _ => matching::normalize(parts, &input)?,
+        }
     };
     let operation = format!("workflow:{}", parts.join("/"));
     let receipt=sqlx::query("SELECT request_json,result_json FROM request_receipt WHERE operation=? AND target='' AND key=?")
@@ -59,13 +63,17 @@ pub async fn post(
             serde_json::from_str(row.get("result_json")).map_err(|_| ApiError::internal())?;
         return Ok((StatusCode::OK, json!({"data":result,"deduplicated":true})));
     }
-    let result = match parts {
-        ["cvs"] => cvs::save(c, None, &normalized).await?,
-        ["cvs", id, "revisions"] => cvs::save(c, Some(id), &normalized).await?,
-        ["cvs", id, action @ ("delete" | "restore")] => {
-            cvs::change_lifecycle(c, id, *action == "delete", &normalized).await?
+    let result = if cv_reviews::handles(parts) {
+        cv_reviews::write(c, parts, &normalized).await?
+    } else {
+        match parts {
+            ["cvs"] => cvs::save(c, None, &normalized).await?,
+            ["cvs", id, "revisions"] => cvs::save(c, Some(id), &normalized).await?,
+            ["cvs", id, action @ ("delete" | "restore")] => {
+                cvs::change_lifecycle(c, id, *action == "delete", &normalized).await?
+            }
+            _ => matching::write(c, parts, &normalized).await?,
         }
-        _ => matching::write(c, parts, &normalized).await?,
     };
     sqlx::query("INSERT INTO request_receipt(operation,target,key,request_json,result_json) VALUES(?,'',?,?,?)")
   .bind(operation).bind(key).bind(normalized.to_string()).bind(result.to_string()).execute(c).await?;
@@ -77,6 +85,9 @@ pub async fn post(
     Ok((status, json!({"data":result,"deduplicated":false})))
 }
 pub async fn read(c: &mut SqliteConnection, parts: &[&str], query: &str) -> Result<Value> {
+    if cv_reviews::handles(parts) {
+        return cv_reviews::read(c, parts, query).await;
+    }
     if matches!(parts, ["cvs", _, "revisions"]) {
         return s::read(c, parts, query).await;
     }

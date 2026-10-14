@@ -56,3 +56,7 @@ CV state filters accept repeated cv_state=active / deleted with OR semantics, AN
 The executable supports maintenance release-info; inspect --database <existing>; backup --database <existing> --output <new>; migrate --database <existing>; and preserve --baseline <existing> --database <prepared>. Read-only inspection outputs counts/hashes, migration compatibility, physical path and identity, never record contents.
 
 Backup uses the pinned SQLite online backup API including committed WAL; missing sources/existing destinations are refused. Bounded failure retains partial diagnostics. The updater migrates a staged generation and verifies old values/duplicate-row multiplicity. Migration 13 adds only runtime_identity. Historical 1–12 checksums/user rows are preserved; .gitattributes pins their existing LF/CRLF bytes. No HTTP maintenance endpoint exists.
+
+## Explicit CV recommendations
+
+Russian CV cards now request single-CV reviews, directional CV comparisons or saved-vacancy packets. The local agent API persists revision-bound recommendations, user rejections, explicit resolutions, history and merged vacancy evidence. Import never resolves recommendations and no model runs in the background. See [../../docs/cv-recommendations.md](../../docs/cv-recommendations.md) for the API, transport, batching and deployment contract.

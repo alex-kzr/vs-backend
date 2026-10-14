@@ -1,5 +1,6 @@
 mod adapters;
 mod browser_review;
+mod cv_reviews;
 mod cvs;
 pub mod error;
 pub mod hh;

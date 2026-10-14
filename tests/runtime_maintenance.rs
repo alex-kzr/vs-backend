@@ -97,7 +97,34 @@ async fn staged_identity_migration_preserves_the_source_and_prior_rows() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("legacy.sqlite3");
     let output = dir.path().join("staged.sqlite3");
-    let pool = open_database(&source).await.unwrap();
+    let migrations = dir.path().join("legacy12-migrations");
+    std::fs::create_dir(&migrations).unwrap();
+    for entry in
+        std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))
+            .unwrap()
+    {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        let text = name.to_str().unwrap();
+        let version = text.split('_').next().unwrap().parse::<i64>().unwrap();
+        if version <= 12 {
+            std::fs::copy(entry.path(), migrations.join(name)).unwrap();
+        }
+    }
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&source)
+        .create_if_missing(true);
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::migrate::Migrator::new(migrations.as_path())
+        .await
+        .unwrap()
+        .run(&pool)
+        .await
+        .unwrap();
     sqlx::query("CREATE TABLE private_notes(id INTEGER PRIMARY KEY,note TEXT)")
         .execute(&pool)
         .await
@@ -106,17 +133,9 @@ async fn staged_identity_migration_preserves_the_source_and_prior_rows() {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("DROP TABLE runtime_identity")
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM _sqlx_migrations WHERE version=13")
-        .execute(&pool)
-        .await
-        .unwrap();
     pool.close().await;
     let baseline = maintenance::inspect(&source).await.unwrap();
-    assert_eq!(baseline["pending_migrations"], serde_json::json!([13]));
+    assert_eq!(baseline["pending_migrations"], serde_json::json!([13, 14]));
     maintenance::backup(&source, &output).await.unwrap();
     let migrated = maintenance::migrate_existing(&output).await.unwrap();
     let untouched = maintenance::inspect(&source).await.unwrap();

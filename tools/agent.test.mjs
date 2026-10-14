@@ -39,3 +39,21 @@ test('export reads pinned packet without claiming jobs or invoking a model',asyn
   assert.deepEqual(calls,[['GET','/api/v1/match-runs/'+run+'/inputs']]);
  }finally{await new Promise(resolve=>server.close(resolve));await rm(dir,{recursive:true,force:true});}
 });
+
+test('CV review and CV snapshot exports are read-only and accept only scoped UUID paths',async()=>{
+ const { exportReview, exportCv }=await import('./agent.mjs');
+ const id='10000000-0000-4000-8000-000000000001';const revision='10000000-0000-4000-8000-000000000002';
+ for(const action of ['claim','complete','fail','retry','cancel'])assert.equal(workflowPath('cv-review-runs/'+id+'/'+action),'cv-review-runs/'+id+'/'+action);
+ assert.equal(workflowPath('cv-review-runs'),'cv-review-runs');assert.equal(workflowPath('cv-recommendations/'+id+'/decision'),'cv-recommendations/'+id+'/decision');
+ for(const path of ['cv-review-runs/'+id+'/patch','cv-recommendations/'+id+'/resolve','cv-review-runs/../complete'])assert.throws(()=>workflowPath(path));
+ const dir=await mkdtemp(join(tmpdir(),'vacancy-review-export-'));const calls=[];
+ const server=createServer((req,res)=>{calls.push([req.method,req.url]);res.setHeader('content-type','application/json');res.end(JSON.stringify({data:{id:revision,content:'Synthetic CV only'}}));});
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+ try{
+  const baseUrl='http://127.0.0.1:'+server.address().port;
+  await exportReview({baseUrl,run:id,out:join(dir,'review.json')});
+  await exportCv({baseUrl,cv:id,revision,out:join(dir,'cv.json')});
+  assert.deepEqual(calls,[['GET','/api/v1/cv-review-runs/'+id+'/inputs'],['GET','/api/v1/cvs/'+id+'/revisions/'+revision]]);
+  await assert.rejects(exportCv({baseUrl,cv:'../cvs',revision,out:join(dir,'invalid.json')}));
+ }finally{await new Promise(resolve=>server.close(resolve));await rm(dir,{recursive:true,force:true});}
+});

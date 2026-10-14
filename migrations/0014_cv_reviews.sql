@@ -47,3 +47,14 @@ CREATE TRIGGER cv_recommendation_event_update BEFORE UPDATE ON cv_recommendation
 CREATE TRIGGER cv_recommendation_event_delete BEFORE DELETE ON cv_recommendation_event BEGIN SELECT RAISE(ABORT,'Recommendation history is immutable'); END;
 CREATE TRIGGER cv_review_run_delete BEFORE DELETE ON cv_review_run BEGIN SELECT RAISE(ABORT,'Reviews cannot be deleted'); END;
 CREATE TRIGGER cv_recommendation_delete BEFORE DELETE ON cv_recommendation BEGIN SELECT RAISE(ABORT,'Recommendations cannot be deleted'); END;
+
+CREATE TABLE cv_review_vacancy (
+ ingest_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+ id TEXT NOT NULL UNIQUE,
+ run_id TEXT NOT NULL REFERENCES cv_review_run(id) ON DELETE RESTRICT,
+ vacancy_id TEXT NOT NULL REFERENCES vacancy(id) ON DELETE RESTRICT,
+ data TEXT NOT NULL CHECK(json_valid(data)),
+ UNIQUE(run_id,vacancy_id)
+);
+CREATE TRIGGER cv_review_vacancy_update BEFORE UPDATE ON cv_review_vacancy BEGIN SELECT RAISE(ABORT,'Review inputs are immutable'); END;
+CREATE TRIGGER cv_review_vacancy_delete BEFORE DELETE ON cv_review_vacancy BEGIN SELECT RAISE(ABORT,'Review inputs are immutable'); END;

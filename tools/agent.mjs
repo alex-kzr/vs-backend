@@ -13,7 +13,7 @@ export function localBase(raw='http://127.0.0.1:48173') {
  return u.origin;
 }
 const uuid='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
-const postPath=new RegExp('^(?:cvs(?:/import-preview|/'+uuid+'/(?:revisions|delete|restore))?|match-runs(?:/preview|/'+uuid+'/cancel|/'+uuid+'/jobs/'+uuid+'/(?:claim|complete|fail|retry))?)$');
+const postPath=new RegExp('^(?:cvs(?:/import-preview|/'+uuid+'/(?:revisions|delete|restore))?|match-runs(?:/preview|/'+uuid+'/cancel|/'+uuid+'/jobs/'+uuid+'/(?:claim|complete|fail|retry))?|cv-review-runs(?:/'+uuid+'/(?:claim|complete|fail|retry|cancel))?|cv-recommendations/'+uuid+'/decision)$');
 export function workflowPath(path) {if(!postPath.test(path))throw new Error('Only documented CV / matching POST paths are allowed.');return path;}
 async function request(base,path,method,body,key) {
  const r=await fetch(base+'/api/v1/'+path,{method,redirect:'error',signal:AbortSignal.timeout(30000),headers:method==='POST'?{'Content-Type':'application/json','Idempotency-Key':key}:{},...(method==='POST'?{body:JSON.stringify(body)}:{})});
@@ -45,18 +45,32 @@ export async function exportRun({baseUrl,run,out}) {
  const result=await request(localBase(baseUrl),'match-runs/'+run+'/inputs','GET');
  await save(resolve(out),result);return result;
 }
+export async function exportReview({baseUrl,run,out}) {
+ if(!new RegExp('^'+uuid+'$').test(run))throw new Error('Run must be a UUID.');
+ const result=await request(localBase(baseUrl),'cv-review-runs/'+run+'/inputs','GET');
+ await save(resolve(out),result);return result;
+}
+export async function exportCv({baseUrl,cv,revision,out}) {
+ if(!new RegExp('^'+uuid+'$').test(cv)||!new RegExp('^'+uuid+'$').test(revision))throw new Error('CV and revision must be UUIDs.');
+ const result=await request(localBase(baseUrl),'cvs/'+cv+'/revisions/'+revision,'GET');
+ await save(resolve(out),result);return result;
+}
 async function main(args) {
  const command=args.shift();const options={};
- while(args.length){const name=args.shift();if(!/^--(?:base-url|path|input|out|run)$/.test(name)||!args.length||Object.hasOwn(options,name))throw new Error('Invalid command options.');options[name]=args.shift();}
+ while(args.length){const name=args.shift();if(!/^--(?:base-url|path|input|out|run|cv|revision)$/.test(name)||!args.length||Object.hasOwn(options,name))throw new Error('Invalid command options.');options[name]=args.shift();}
  if(!options['--out'])throw new Error('Choose a private local --out file, outside Git.');
- if(command==='export'&&options['--run']&&!options['--path']&&!options['--input'])
+ if(command==='export-review'&&options['--run']&&!options['--cv']&&!options['--revision']&&!options['--path']&&!options['--input'])
+  await exportReview({baseUrl:options['--base-url'],run:options['--run'],out:options['--out']});
+ else if(command==='export-cv'&&options['--cv']&&options['--revision']&&!options['--run']&&!options['--path']&&!options['--input'])
+  await exportCv({baseUrl:options['--base-url'],cv:options['--cv'],revision:options['--revision'],out:options['--out']});
+ else if(command==='export'&&!options['--cv']&&!options['--revision']&&options['--run']&&!options['--path']&&!options['--input'])
   await exportRun({baseUrl:options['--base-url'],run:options['--run'],out:options['--out']});
- else if(command==='post'&&options['--path']&&options['--input']&&!options['--run']){
+ else if(command==='post'&&!options['--cv']&&!options['--revision']&&options['--path']&&options['--input']&&!options['--run']){
   const inputText=await readFile(resolve(options['--input']),'utf8');
   if(Buffer.byteLength(inputText)>1024*1024)throw new Error('Input exceeds 1 MiB.');
   let input;try{input=JSON.parse(inputText);}catch{throw new Error('Input file is not JSON.');}
   await postWorkflow({baseUrl:options['--base-url'],path:options['--path'],input,out:options['--out']});
- }else throw new Error('Use export --run UUID --out file, or post --path endpoint --input file --out receipt.');
+ }else throw new Error('Use export/export-review --run UUID --out file, export-cv --cv UUID --revision UUID --out file, or post --path endpoint --input file --out receipt.');
  process.stdout.write('Local file saved. No model or browser was invoked.\n');
 }
 if(process.argv[1]&&pathToFileURL(resolve(process.argv[1])).href===import.meta.url)
