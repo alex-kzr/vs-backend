@@ -1386,3 +1386,46 @@ async fn multi_company_filter_is_shared_and_invalid_lists_are_rejected() {
         );
     }
 }
+
+#[tokio::test]
+async fn profile_instructions_preserve_context_and_reject_invalid_text() {
+    let t = TestApp::new().await;
+    let profile = t.post("search-configurations", json!({"name":"Synthetic instructions", "criteria_version":1, "criteria":{"queries":["Rust"],"work_formats":["remote"]}})).await;
+    assert!(profile["criteria"].get("instructions").is_none());
+    let path = format!("search-configurations/{}", profile["id"].as_str().unwrap());
+    let mut criteria = profile["criteria"].clone();
+    let instructions = "Synthetic salary: 3 500 USD/month net.\nConfirm country and schedule; this is not an automatic filter.";
+    criteria["instructions"] = json!(instructions);
+    let (status, result) = t
+        .call("PATCH", &path, json!({"criteria":criteria}), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(
+        t.get(&path).await["data"]["criteria"]["instructions"],
+        instructions
+    );
+    let (status, _) = t
+        .call("PATCH", &path, json!({"name":"Synthetic renamed"}), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(t.get(&path).await["data"]["criteria"], criteria);
+    for invalid in [json!(false), json!("x".repeat(100001))] {
+        let mut bad = criteria.clone();
+        bad["instructions"] = invalid;
+        let (status, _) = t.call("PATCH", &path, json!({"criteria":bad}), None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(t.get(&path).await["data"]["criteria"], criteria);
+    }
+    criteria["instructions"] = Value::Null;
+    let (status, _) = t
+        .call("PATCH", &path, json!({"criteria":criteria}), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let stored = t.get(&path).await;
+    assert!(stored["data"]["criteria"]["instructions"].is_null());
+    assert_eq!(stored["data"]["criteria"]["queries"], json!(["Rust"]));
+    assert_eq!(
+        stored["data"]["criteria"]["work_formats"],
+        json!(["remote"])
+    );
+}
